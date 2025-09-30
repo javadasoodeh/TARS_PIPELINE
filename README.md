@@ -71,11 +71,12 @@ The pipeline uses these environment variables (set in Open WebUI):
 | `WREN_UI_URL` | URL of your Wren-UI service | `http://wren-ui:3000` | Yes |
 | `WREN_UI_TIMEOUT` | API timeout in seconds | `60` | No |
 | `MAX_ROWS` | Maximum rows to display | `500` | No |
+| `MODEL_NAME` | Display name for the pipeline in Open WebUI | `WrenAI Database Query Pipeline` | No |
 
 ## 🎯 Usage
 
 1. **Access Open WebUI**: Go to your Open WebUI interface
-2. **Select Pipeline**: Look for "WrenAI Database Query Pipeline" in model selection
+2. **Select Pipeline**: Look for your custom pipeline name (default: "WrenAI Database Query Pipeline") in model selection
 3. **Ask Questions**: Use natural language to query your database
 
 ### Example Queries

@@ -22,6 +22,7 @@ class Pipeline:
         WREN_UI_URL: str
         WREN_UI_TIMEOUT: int
         MAX_ROWS: int
+        MODEL_NAME: str
 
     def __init__(self):
         self.name = "WrenAI Database Query Pipeline"
@@ -33,12 +34,15 @@ class Pipeline:
                 "WREN_UI_URL": os.getenv("WREN_UI_URL", "http://wren-ui:3000"),
                 "WREN_UI_TIMEOUT": int(os.getenv("WREN_UI_TIMEOUT", "60")),
                 "MAX_ROWS": int(os.getenv("MAX_ROWS", "500")),
+                "MODEL_NAME": os.getenv("MODEL_NAME", "WrenAI Database Query Pipeline"),
             }
         )
 
     async def on_startup(self):
         """Initialize the pipeline on startup."""
+        self.name = self.valves.MODEL_NAME
         logging.info(f"WrenAI Pipeline started with URL: {self.valves.WREN_UI_URL}")
+        logging.info(f"Pipeline name: {self.name}")
 
     async def on_shutdown(self):
         """Cleanup on shutdown."""
