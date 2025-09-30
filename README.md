@@ -72,6 +72,7 @@ The pipeline uses these environment variables (set in Open WebUI):
 | `WREN_UI_TIMEOUT` | API timeout in seconds | `60` | No |
 | `MAX_ROWS` | Maximum rows to display | `500` | No |
 | `MODEL_NAME` | Display name for the pipeline in Open WebUI | `WrenAI Database Query Pipeline` | No |
+| `CHUNK_SIZE` | Size of response chunks to prevent "Chunk too big" error | `1000` | No |
 
 ## 🎯 Usage
 
@@ -124,6 +125,11 @@ ORDER BY total_sales DESC
 - Check if database schema is indexed in Wren-UI
 - Verify database connection
 - Try simpler queries first
+
+### "Chunk too big" Error
+- Reduce `CHUNK_SIZE` valve value (try 500 or 800)
+- Reduce `MAX_ROWS` valve value to limit data size
+- Check if query returns too much data
 
 ## 📞 Support
 

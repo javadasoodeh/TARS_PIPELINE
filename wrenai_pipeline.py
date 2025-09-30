@@ -23,6 +23,7 @@ class Pipeline:
         WREN_UI_TIMEOUT: int
         MAX_ROWS: int
         MODEL_NAME: str
+        CHUNK_SIZE: int
 
     def __init__(self):
         self.name = "WrenAI Database Query Pipeline"
@@ -35,6 +36,7 @@ class Pipeline:
                 "WREN_UI_TIMEOUT": int(os.getenv("WREN_UI_TIMEOUT", "60")),
                 "MAX_ROWS": int(os.getenv("MAX_ROWS", "500")),
                 "MODEL_NAME": os.getenv("MODEL_NAME", "WrenAI Database Query Pipeline"),
+                "CHUNK_SIZE": int(os.getenv("CHUNK_SIZE", "1000")),
             }
         )
 
@@ -207,43 +209,43 @@ class Pipeline:
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
                 error_msg = ask_response.get("error", "Unknown error occurred")
-                return f"## ❌ Database Query Error\n\n**Error:** {error_msg}\n\n*This usually means the database schema hasn't been indexed yet or the question doesn't match available data. Please try a different question or check if the database is properly set up.*"
+                yield f"## ❌ Database Query Error\n\n**Error:** {error_msg}\n\n*This usually means the database schema hasn't been indexed yet or the question doesn't match available data. Please try a different question or check if the database is properly set up.*"
+                return
             
-            # Build response content
-            content_parts = []
-            
+            # Stream response content
             # Add summary if available
             if ask_response.get("summary"):
-                content_parts.append(f"## 📊 Summary\n\n{ask_response['summary']}")
+                yield f"## 📊 Summary\n\n{ask_response['summary']}\n\n"
             
             # Add SQL query if present
             if ask_response.get("sql"):
-                content_parts.append(f"## 🔍 SQL Query\n\n```sql\n{ask_response['sql']}\n```")
+                yield f"## 🔍 SQL Query\n\n```sql\n{ask_response['sql']}\n```\n\n"
                 
                 # Step 2: Execute the SQL query
                 logging.info("Step 2: Executing SQL query...")
                 sql_response = self.run_sql(ask_response["sql"], ask_response.get("threadId"))
                 
                 if sql_response.get("error"):
-                    content_parts.append(f"## ❌ SQL Execution Error\n\n{sql_response['error']}")
+                    yield f"## ❌ SQL Execution Error\n\n{sql_response['error']}"
                 else:
                     records = sql_response.get("records", [])
                     columns = sql_response.get("columns", [])
                     total_rows = sql_response.get("totalRows", 0)
                     
                     if records and columns:
-                        content_parts.append(f"## 📋 Results ({total_rows:,} rows)\n\n{self.create_markdown_table(records, columns, self.valves.MAX_ROWS)}")
+                        yield f"## 📋 Results ({total_rows:,} rows)\n\n"
+                        # Stream the table in chunks to avoid "Chunk too big" error
+                        table_content = self.create_markdown_table(records, columns, self.valves.MAX_ROWS)
+                        # Split table into smaller chunks
+                        for i in range(0, len(table_content), self.valves.CHUNK_SIZE):
+                            yield table_content[i:i + self.valves.CHUNK_SIZE]
                     else:
-                        content_parts.append("## 📋 Results\n\n*No data returned from the query.*")
+                        yield "## 📋 Results\n\n*No data returned from the query.*"
             else:
-                content_parts.append("## ⚠️ No SQL Query Generated\n\n*The question could not be converted to a SQL query.*")
-            
-            # Combine all parts
-            result = "\n\n".join(content_parts) if content_parts else "No response generated."
+                yield "## ⚠️ No SQL Query Generated\n\n*The question could not be converted to a SQL query.*"
             
             logging.info("Pipeline completed successfully")
-            return result
             
         except Exception as e:
             logging.error(f"Pipeline execution error: {e}")
-            return f"**Pipeline Error:** {str(e)}"
+            yield f"**Pipeline Error:** {str(e)}"
