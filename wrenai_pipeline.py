@@ -149,11 +149,11 @@ class Pipeline:
         return "\n".join(table_lines) + summary
 
     def clean_text(self, text: str) -> str:
-        """Clean up text formatting issues from API responses."""
+        """Clean up text formatting issues from API responses to proper markdown format."""
         if not text:
             return text
         
-        # Replace escaped newlines with actual newlines
+        # Replace escaped newlines with actual newlines for proper markdown rendering
         cleaned = text.replace('\\n', '\n')
         
         # Replace escaped quotes if any
@@ -163,7 +163,20 @@ class Pipeline:
         # Replace escaped backslashes
         cleaned = cleaned.replace('\\\\', '\\')
         
-        return cleaned
+        # Convert numbered lists to proper markdown format
+        # Look for patterns like "1. Item text" and ensure proper spacing
+        lines = cleaned.split('\n')
+        formatted_lines = []
+        
+        for line in lines:
+            # Check if line starts with a number followed by a period
+            if line.strip() and line.strip()[0].isdigit() and '. ' in line:
+                # Ensure proper spacing for numbered lists
+                formatted_lines.append(line.strip())
+            else:
+                formatted_lines.append(line)
+        
+        return '\n'.join(formatted_lines)
 
     def ask_question(self, question: str) -> dict:
         """Ask a question to Wren-UI API."""
