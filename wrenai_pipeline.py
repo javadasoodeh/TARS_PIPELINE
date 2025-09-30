@@ -2,9 +2,9 @@
 title: WrenAI Database Query Pipeline
 author: Javad Asoodeh
 date: 2025-01-30
-version: 1.0
+version: 2.0
 license: MIT
-description: A pipeline for natural language to SQL query conversion using Wren-UI APIs with automatic execution and markdown table formatting.
+description: A pipeline for natural language to SQL query conversion using Wren-UI APIs with proper conversation context handling.
 requirements: requests, pydantic
 """
 
@@ -14,6 +14,7 @@ from typing import List, Union, Generator, Iterator
 import os
 from pydantic import BaseModel
 import json
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 
@@ -66,7 +67,7 @@ class Pipeline:
         headers = {
             "Accept": "application/json; charset=utf-8",
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "WrenAI-Pipeline/1.0"
+            "User-Agent": "WrenAI-Pipeline/2.0"
         }
         
         for attempt in range(retries):
@@ -194,17 +195,72 @@ class Pipeline:
         
         return '\n'.join(formatted_lines)
 
-    def ask_question(self, question: str, thread_id: str = None) -> dict:
-        """Ask a question to Wren-UI API."""
+    def extract_conversation_context(self, messages: List[dict]) -> str:
+        """Extract conversation context from Open WebUI messages for better follow-up handling."""
+        if not messages or len(messages) <= 1:
+            return ""
+        
+        # Get the last few messages for context
+        context_messages = messages[-4:]  # Last 4 messages
+        context_parts = []
+        
+        for msg in context_messages:
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+            
+            if role == 'user':
+                context_parts.append(f"User: {content}")
+            elif role == 'assistant':
+                # Extract key information from assistant responses
+                if 'SQL Query' in content:
+                    # Extract SQL from previous responses
+                    lines = content.split('\n')
+                    sql_lines = []
+                    in_sql = False
+                    for line in lines:
+                        if '```sql' in line:
+                            in_sql = True
+                            continue
+                        elif '```' in line and in_sql:
+                            in_sql = False
+                            break
+                        elif in_sql:
+                            sql_lines.append(line)
+                    
+                    if sql_lines:
+                        context_parts.append(f"Previous SQL: {' '.join(sql_lines)}")
+                
+                # Extract summary information
+                if 'Summary' in content:
+                    summary_start = content.find('## 📊 Summary')
+                    if summary_start != -1:
+                        summary_end = content.find('##', summary_start + 1)
+                        if summary_end == -1:
+                            summary_end = len(content)
+                        summary = content[summary_start:summary_end].replace('## 📊 Summary', '').strip()
+                        if summary:
+                            context_parts.append(f"Previous Summary: {summary[:200]}...")
+        
+        return "\n".join(context_parts)
+
+    def ask_question_with_context(self, question: str, conversation_context: str = "", thread_id: str = None) -> dict:
+        """Ask a question to Wren-UI API with conversation context."""
         ask_url = f"{self.valves.WREN_UI_URL}/api/v1/ask"
         
+        # Enhance question with context if available
+        enhanced_question = question
+        if conversation_context:
+            enhanced_question = f"{question}\n\nContext from previous conversation:\n{conversation_context}"
+            logging.info(f"Enhanced question with context: {enhanced_question[:200]}...")
+        
         payload = {
-            "question": question
+            "question": enhanced_question
         }
         
         # Add thread ID for follow-up questions
         if thread_id:
             payload["threadId"] = thread_id
+            logging.info(f"Using thread ID: {thread_id}")
 
         logging.info(f"Asking question: {question}")
         
@@ -261,7 +317,7 @@ class Pipeline:
             }
 
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
-        """Main pipeline function that processes user queries."""
+        """Main pipeline function that processes user queries with conversation context."""
         try:
             # Extract thread ID from Open WebUI context for follow-up questions
             thread_id = None
@@ -276,9 +332,14 @@ class Pipeline:
             else:
                 logging.info("No metadata found in body, treating as new conversation")
             
+            # Extract conversation context for better follow-up handling
+            conversation_context = self.extract_conversation_context(messages)
+            if conversation_context:
+                logging.info(f"Extracted conversation context: {conversation_context[:200]}...")
+            
             # Step 1: Ask the question to get SQL query and summary
             logging.info("Step 1: Asking question to Wren-UI...")
-            ask_response = self.ask_question(user_message, thread_id)
+            ask_response = self.ask_question_with_context(user_message, conversation_context, thread_id)
             
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
