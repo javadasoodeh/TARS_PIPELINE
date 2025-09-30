@@ -27,6 +27,8 @@ class Pipeline:
 
     def __init__(self):
         self.nlsql_response = ""
+        # Thread ID management: store thread IDs per Open WebUI chat
+        self.thread_ids = {}  # {openwebui_chat_id: wren_ui_thread_id}
 
         self.valves = self.Valves(
             **{
@@ -61,6 +63,19 @@ class Pipeline:
     async def on_shutdown(self):
         """Cleanup on shutdown."""
         logging.info("WrenAI Pipeline shutdown")
+
+    def get_thread_id_for_chat(self, openwebui_chat_id: str) -> str:
+        """Get the Wren-UI thread ID for a given Open WebUI chat ID."""
+        return self.thread_ids.get(openwebui_chat_id)
+
+    def set_thread_id_for_chat(self, openwebui_chat_id: str, wren_ui_thread_id: str):
+        """Set the Wren-UI thread ID for a given Open WebUI chat ID."""
+        self.thread_ids[openwebui_chat_id] = wren_ui_thread_id
+        logging.info(f"Stored thread ID {wren_ui_thread_id} for chat {openwebui_chat_id}")
+
+    def is_new_chat(self, openwebui_chat_id: str) -> bool:
+        """Check if this is a new chat (no stored thread ID)."""
+        return openwebui_chat_id not in self.thread_ids
 
     def make_request_with_retry(self, url: str, method: str = "POST", data: dict = None, retries: int = 3, timeout: int = 60):
         """Make HTTP request with retry logic."""
@@ -319,18 +334,23 @@ class Pipeline:
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """Main pipeline function that processes user queries with conversation context."""
         try:
-            # Extract thread ID from Open WebUI context for follow-up questions
-            thread_id = None
+            # Extract Open WebUI chat ID
+            openwebui_chat_id = None
             if body and 'metadata' in body:
                 metadata = body['metadata']
-                # Try to get thread ID from various possible locations
-                thread_id = metadata.get('chat_id') or metadata.get('session_id') or metadata.get('thread_id')
-                if thread_id:
-                    logging.info(f"Using thread ID for follow-up question: {thread_id}")
-                else:
-                    logging.info("No thread ID found in metadata, treating as new conversation")
+                openwebui_chat_id = metadata.get('chat_id') or metadata.get('session_id') or metadata.get('thread_id')
+            
+            if not openwebui_chat_id:
+                logging.info("No Open WebUI chat ID found, treating as new conversation")
+                openwebui_chat_id = "unknown-chat"
+            
+            # Get or determine Wren-UI thread ID
+            wren_ui_thread_id = self.get_thread_id_for_chat(openwebui_chat_id)
+            
+            if wren_ui_thread_id:
+                logging.info(f"Using existing Wren-UI thread ID: {wren_ui_thread_id} for chat: {openwebui_chat_id}")
             else:
-                logging.info("No metadata found in body, treating as new conversation")
+                logging.info(f"New chat detected: {openwebui_chat_id}, will get thread ID from Wren-UI response")
             
             # Extract conversation context for better follow-up handling
             conversation_context = self.extract_conversation_context(messages)
@@ -339,7 +359,13 @@ class Pipeline:
             
             # Step 1: Ask the question to get SQL query and summary
             logging.info("Step 1: Asking question to Wren-UI...")
-            ask_response = self.ask_question_with_context(user_message, conversation_context, thread_id)
+            ask_response = self.ask_question_with_context(user_message, conversation_context, wren_ui_thread_id)
+            
+            # Store thread ID from Wren-UI response if this is a new chat
+            if not wren_ui_thread_id and ask_response.get("threadId"):
+                self.set_thread_id_for_chat(openwebui_chat_id, ask_response["threadId"])
+                wren_ui_thread_id = ask_response["threadId"]
+                logging.info(f"Stored new Wren-UI thread ID: {wren_ui_thread_id} for chat: {openwebui_chat_id}")
             
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
@@ -360,7 +386,7 @@ class Pipeline:
                 
                 # Step 2: Execute the SQL query
                 logging.info("Step 2: Executing SQL query...")
-                sql_response = self.run_sql(ask_response["sql"], thread_id)
+                sql_response = self.run_sql(ask_response["sql"], wren_ui_thread_id)
                 
                 if sql_response.get("error"):
                     yield f"## ❌ SQL Execution Error\n\n{sql_response['error']}"
