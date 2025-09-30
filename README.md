@@ -18,61 +18,59 @@ A powerful Open WebUI pipeline that enables natural language to SQL query conver
 ## 📋 Prerequisites
 
 - Open WebUI instance running
+- Open WebUI Pipelines server running and configured
 - Wren-UI service accessible
-- Python 3.8+ (handled by Open WebUI)
+- Admin access in Open WebUI
 
 ## 🛠 Installation
 
-### Method 1: Direct Upload (Recommended)
+### Method 1: Install from GitHub URL (Recommended)
+
+1. **Access Open WebUI Admin Panel**:
+   - Log in to your Open WebUI instance with an admin account
+   - Click on the gear icon (⚙️) or your avatar in the top-right corner
+   - Navigate to **Settings** → **Pipelines** tab
+
+2. **Install from URL**:
+   - Look for **"Install from URL"** or **"Add New Pipeline"** option
+   - Paste this raw GitHub URL:
+   ```
+   https://raw.githubusercontent.com/javadasoodeh/TARS_PIPELINE/main/wrenai_pipeline.py
+   ```
+   - Click **Install** or **Add Pipeline**
+
+3. **Configure Valves** (if needed):
+   - Set the required environment variables:
+     - `WREN_UI_URL`: URL of your Wren-UI service (default: `http://wren-ui:3000`)
+     - `WREN_UI_TIMEOUT`: API timeout in seconds (default: `60`)
+     - `MAX_ROWS`: Maximum rows to display (default: `500`)
+
+4. **Activate Pipeline**:
+   - Ensure the pipeline is enabled/activated
+   - The pipeline should now appear in your available pipelines
+
+### Method 2: Manual Upload
 
 1. **Download the pipeline file**:
    ```bash
    wget https://raw.githubusercontent.com/javadasoodeh/TARS_PIPELINE/main/wrenai_pipeline.py
    ```
 
-2. **Access Open WebUI Admin Panel**:
-   - Go to `http://your-openwebui-url/admin`
-   - Navigate to **Pipelines** section
-
-3. **Upload Pipeline**:
+2. **Upload via Admin Panel**:
+   - Go to **Settings** → **Pipelines**
    - Click **"Add New Pipeline"**
-   - Name: `WrenAI Database Query Pipeline`
    - Copy and paste the content of `wrenai_pipeline.py`
    - Save and enable the pipeline
 
-### Method 2: Docker Volume Mount
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/javadasoodeh/TARS_PIPELINE.git
-   cd TARS_PIPELINE
-   ```
-
-2. **Copy to Open WebUI pipelines directory**:
-   ```bash
-   docker cp wrenai_pipeline.py your-openwebui-container:/app/pipelines/
-   docker restart your-openwebui-container
-   ```
-
-### Method 3: Environment Variable
-
-Add to your Open WebUI environment:
-```bash
-PIPELINES_URLS="https://raw.githubusercontent.com/javadasoodeh/TARS_PIPELINE/main/wrenai_pipeline.py"
-```
-
 ## ⚙️ Configuration
 
-Set these environment variables in your Open WebUI configuration:
+The pipeline uses these environment variables (set in Open WebUI):
 
-```bash
-# Required
-WREN_UI_URL=http://wren-ui:3000
-
-# Optional
-WREN_UI_TIMEOUT=60          # API timeout in seconds
-MAX_ROWS=500                # Maximum rows to display
-```
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `WREN_UI_URL` | URL of your Wren-UI service | `http://wren-ui:3000` | Yes |
+| `WREN_UI_TIMEOUT` | API timeout in seconds | `60` | No |
+| `MAX_ROWS` | Maximum rows to display | `500` | No |
 
 ## 🎯 Usage
 
@@ -113,7 +111,7 @@ ORDER BY total_sales DESC
 
 ### Pipeline Not Appearing
 - Check Open WebUI logs: `docker logs open-webui`
-- Verify pipeline file is in correct location
+- Verify Pipelines server is running
 - Restart Open WebUI service
 
 ### Connection Issues
@@ -126,42 +124,18 @@ ORDER BY total_sales DESC
 - Verify database connection
 - Try simpler queries first
 
-## 📁 File Structure
+## 📞 Support
 
-```
-TARS_PIPELINE/
-├── wrenai_pipeline.py      # Main pipeline implementation
-├── requirements.txt        # Python dependencies
-├── pipeline_config.py      # Configuration management
-└── README.md              # This file
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+If you encounter any issues:
+1. Check the troubleshooting section above
+2. Open an issue on [GitHub](https://github.com/javadasoodeh/TARS_PIPELINE/issues)
+3. Contact: asoodeh.j@orchidpharmed.com
 
 ## 👨‍💻 Author
 
-**Javad Asoodeh**
-- Email: asoodeh.j@orchidpharmed.com
-- GitHub: [@javadasoodeh](https://github.com/javadasoodeh)
-
-## 🙏 Acknowledgments
-
-- [Open WebUI](https://github.com/open-webui/open-webui) for the amazing platform
-- [Wren-UI](https://github.com/Canner/wren-ui) for the SQL generation capabilities
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-
-1. Check the [troubleshooting section](#-troubleshooting)
-2. Open an issue on [GitHub](https://github.com/javadasoodeh/TARS_PIPELINE/issues)
-3. Contact: asoodeh.j@orchidpharmed.com
+**Javad Asoodeh**  
+Email: asoodeh.j@orchidpharmed.com  
+GitHub: [@javadasoodeh](https://github.com/javadasoodeh)
 
 ---
 

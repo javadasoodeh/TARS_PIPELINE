@@ -1,3 +1,13 @@
+"""
+title: WrenAI Database Query Pipeline
+author: Javad Asoodeh
+date: 2025-01-30
+version: 1.0
+license: MIT
+description: A pipeline for natural language to SQL query conversion using Wren-UI APIs with automatic execution and markdown table formatting.
+requirements: requests, pydantic
+"""
+
 import requests
 import logging
 from typing import List, Union, Generator, Iterator
