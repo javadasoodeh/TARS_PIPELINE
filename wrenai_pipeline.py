@@ -194,13 +194,17 @@ class Pipeline:
         
         return '\n'.join(formatted_lines)
 
-    def ask_question(self, question: str) -> dict:
+    def ask_question(self, question: str, thread_id: str = None) -> dict:
         """Ask a question to Wren-UI API."""
         ask_url = f"{self.valves.WREN_UI_URL}/api/v1/ask"
         
         payload = {
             "question": question
         }
+        
+        # Add thread ID for follow-up questions
+        if thread_id:
+            payload["threadId"] = thread_id
 
         logging.info(f"Asking question: {question}")
         
@@ -259,9 +263,22 @@ class Pipeline:
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """Main pipeline function that processes user queries."""
         try:
+            # Extract thread ID from Open WebUI context for follow-up questions
+            thread_id = None
+            if body and 'metadata' in body:
+                metadata = body['metadata']
+                # Try to get thread ID from various possible locations
+                thread_id = metadata.get('chat_id') or metadata.get('session_id') or metadata.get('thread_id')
+                if thread_id:
+                    logging.info(f"Using thread ID for follow-up question: {thread_id}")
+                else:
+                    logging.info("No thread ID found in metadata, treating as new conversation")
+            else:
+                logging.info("No metadata found in body, treating as new conversation")
+            
             # Step 1: Ask the question to get SQL query and summary
             logging.info("Step 1: Asking question to Wren-UI...")
-            ask_response = self.ask_question(user_message)
+            ask_response = self.ask_question(user_message, thread_id)
             
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
@@ -282,7 +299,7 @@ class Pipeline:
                 
                 # Step 2: Execute the SQL query
                 logging.info("Step 2: Executing SQL query...")
-                sql_response = self.run_sql(ask_response["sql"], ask_response.get("threadId"))
+                sql_response = self.run_sql(ask_response["sql"], ask_response.get("threadId") or thread_id)
                 
                 if sql_response.get("error"):
                     yield f"## ❌ SQL Execution Error\n\n{sql_response['error']}"
