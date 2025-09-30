@@ -243,41 +243,6 @@ class Pipeline:
         
         return "\n".join(context_parts)
 
-    def enhance_follow_up_question(self, question: str, conversation_context: str) -> str:
-        """Enhance follow-up questions to be more explicit for Wren-UI understanding."""
-        # Common follow-up patterns that need enhancement
-        follow_up_patterns = {
-            # Persian patterns
-            'دوتاش کن': 'Please run the same query again',
-            'دوباره': 'Please run the same query again', 
-            'همین رو': 'Please run the same query again',
-            'همین کار رو': 'Please run the same query again',
-            'تکرار کن': 'Please repeat the same query',
-            'نشون بده': 'Please show the same results',
-            'باز کن': 'Please run the same query again',
-            
-            # English patterns
-            'do it again': 'Please run the same query again',
-            'repeat': 'Please run the same query again',
-            'show again': 'Please show the same results again',
-            'run again': 'Please run the same query again',
-            'same query': 'Please run the same query again',
-            'again': 'Please run the same query again',
-        }
-        
-        # Check if this is a follow-up pattern
-        question_lower = question.lower().strip()
-        for pattern, enhancement in follow_up_patterns.items():
-            if pattern in question_lower:
-                # If we have context, enhance the question
-                if conversation_context:
-                    return f"{enhancement}. {conversation_context}"
-                else:
-                    return f"{enhancement}."
-        
-        # If not a follow-up pattern, return original question
-        return question
-
     def ask_question_with_context(self, question: str, conversation_context: str = "", thread_id: str = None) -> dict:
         """Ask a question to Wren-UI API with conversation context."""
         ask_url = f"{self.valves.WREN_UI_URL}/api/v1/ask"
@@ -372,14 +337,9 @@ class Pipeline:
             if conversation_context:
                 logging.info(f"Extracted conversation context: {conversation_context[:200]}...")
             
-            # Enhance follow-up questions to be more explicit
-            enhanced_question = self.enhance_follow_up_question(user_message, conversation_context)
-            if enhanced_question != user_message:
-                logging.info(f"Enhanced follow-up question: '{user_message}' -> '{enhanced_question}'")
-            
             # Step 1: Ask the question to get SQL query and summary
             logging.info("Step 1: Asking question to Wren-UI...")
-            ask_response = self.ask_question_with_context(enhanced_question, conversation_context, thread_id)
+            ask_response = self.ask_question_with_context(user_message, conversation_context, thread_id)
             
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
@@ -400,7 +360,7 @@ class Pipeline:
                 
                 # Step 2: Execute the SQL query
                 logging.info("Step 2: Executing SQL query...")
-                sql_response = self.run_sql(ask_response["sql"], ask_response.get("threadId") or thread_id)
+                sql_response = self.run_sql(ask_response["sql"], thread_id)
                 
                 if sql_response.get("error"):
                     yield f"## ❌ SQL Execution Error\n\n{sql_response['error']}"
