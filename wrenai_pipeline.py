@@ -148,58 +148,6 @@ class Pipeline:
         
         return "\n".join(table_lines) + summary
 
-    def stream_markdown_table(self, records: List[dict], columns: List[dict], max_rows: int = 500):
-        """Stream a markdown table row by row to avoid chunk size issues."""
-        if not records or not columns:
-            yield "No data available."
-            return
-        
-        # Limit rows to max_rows
-        limited_records = records[:max_rows]
-        
-        # Get column names
-        column_names = [col["name"] for col in columns]
-        
-        # Create and yield table header
-        header = "| " + " | ".join(column_names) + " |"
-        separator = "| " + " | ".join(["---"] * len(column_names)) + " |"
-        
-        yield header
-        yield separator
-        
-        # Stream table rows one by one
-        for record in limited_records:
-            row_values = []
-            for col_name in column_names:
-                value = record.get(col_name, "")
-                # Format the value for better readability
-                if isinstance(value, (int, float)):
-                    if isinstance(value, float):
-                        # Format large numbers with commas
-                        if abs(value) >= 1000:
-                            formatted_value = f"{value:,.2f}"
-                        else:
-                            formatted_value = f"{value:.2f}"
-                    else:
-                        formatted_value = f"{value:,}"
-                else:
-                    formatted_value = str(value) if value is not None else ""
-                
-                row_values.append(formatted_value)
-            
-            row = "| " + " | ".join(row_values) + " |"
-            yield row
-        
-        # Add summary
-        total_rows = len(records)
-        displayed_rows = len(limited_records)
-        
-        summary = f"\n\n**Total rows:** {total_rows:,}"
-        if displayed_rows < total_rows:
-            summary += f" (showing first {displayed_rows:,} rows)"
-        
-        yield summary
-
     def ask_question(self, question: str) -> dict:
         """Ask a question to Wren-UI API."""
         ask_url = f"{self.valves.WREN_UI_URL}/api/v1/ask"
@@ -297,8 +245,12 @@ class Pipeline:
                     
                     if records and columns:
                         yield f"## 📋 Results ({total_rows:,} rows)\n\n"
-                        # Stream the table row by row to avoid "Chunk too big" error
-                        yield from self.stream_markdown_table(records, columns, self.valves.MAX_ROWS)
+                        # Create the table and stream it in small chunks to avoid "Chunk too big" error
+                        table_content = self.create_markdown_table(records, columns, self.valves.MAX_ROWS)
+                        # Split table into smaller chunks for streaming
+                        chunk_size = 2000  # Smaller chunks to prevent "Chunk too big" error
+                        for i in range(0, len(table_content), chunk_size):
+                            yield table_content[i:i + chunk_size]
                     else:
                         yield "## 📋 Results\n\n*No data returned from the query.*"
             else:
