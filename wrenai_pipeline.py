@@ -148,6 +148,23 @@ class Pipeline:
         
         return "\n".join(table_lines) + summary
 
+    def clean_text(self, text: str) -> str:
+        """Clean up text formatting issues from API responses."""
+        if not text:
+            return text
+        
+        # Replace escaped newlines with actual newlines
+        cleaned = text.replace('\\n', '\n')
+        
+        # Replace escaped quotes if any
+        cleaned = cleaned.replace('\\"', '"')
+        cleaned = cleaned.replace("\\'", "'")
+        
+        # Replace escaped backslashes
+        cleaned = cleaned.replace('\\\\', '\\')
+        
+        return cleaned
+
     def ask_question(self, question: str) -> dict:
         """Ask a question to Wren-UI API."""
         ask_url = f"{self.valves.WREN_UI_URL}/api/v1/ask"
@@ -219,14 +236,16 @@ class Pipeline:
             
             # Check for errors in the response
             if ask_response.get("error") or ask_response.get("code") == "NO_RELEVANT_DATA":
-                error_msg = ask_response.get("error", "Unknown error occurred")
+                error_msg = self.clean_text(ask_response.get("error", "Unknown error occurred"))
                 yield f"## ❌ Database Query Error\n\n**Error:** {error_msg}\n\n*This usually means the database schema hasn't been indexed yet or the question doesn't match available data. Please try a different question or check if the database is properly set up.*"
                 return
             
             # Stream response content
             # Add summary if available
             if ask_response.get("summary"):
-                yield f"## 📊 Summary\n\n{ask_response['summary']}\n\n"
+                # Clean up the summary text formatting
+                clean_summary = self.clean_text(ask_response['summary'])
+                yield f"## 📊 Summary\n\n{clean_summary}\n\n"
             
             # Add SQL query if present
             if ask_response.get("sql"):
