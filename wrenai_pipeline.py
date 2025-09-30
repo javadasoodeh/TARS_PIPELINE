@@ -25,7 +25,6 @@ class Pipeline:
         MODEL_NAME: str
 
     def __init__(self):
-        self.name = "WrenAI Database Query Pipeline"
         self.nlsql_response = ""
 
         self.valves = self.Valves(
@@ -37,9 +36,23 @@ class Pipeline:
                 "MODEL_NAME": os.getenv("MODEL_NAME", "WrenAI Database Query Pipeline"),
             }
         )
+        
+        # Set the name from the valve value
+        self.name = self.valves.MODEL_NAME
+
+    @property
+    def name(self):
+        """Dynamic name property that updates when valves change."""
+        return self.valves.MODEL_NAME
+
+    @name.setter
+    def name(self, value):
+        """Setter for name property."""
+        self._name = value
 
     async def on_startup(self):
         """Initialize the pipeline on startup."""
+        # Update name in case valves were changed after initialization
         self.name = self.valves.MODEL_NAME
         logging.info(f"WrenAI Pipeline started with URL: {self.valves.WREN_UI_URL}")
         logging.info(f"Pipeline name: {self.name}")
