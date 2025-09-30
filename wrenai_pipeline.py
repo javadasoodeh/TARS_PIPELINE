@@ -149,31 +149,47 @@ class Pipeline:
         return "\n".join(table_lines) + summary
 
     def clean_text(self, text: str) -> str:
-        """Clean up text formatting issues from API responses to proper markdown format."""
+        """Convert API response text to proper markdown format for Open WebUI rendering."""
         if not text:
             return text
         
-        # Replace escaped newlines with actual newlines for proper markdown rendering
+        # Replace escaped newlines with actual newlines
         cleaned = text.replace('\\n', '\n')
         
-        # Replace escaped quotes if any
+        # Replace escaped quotes
         cleaned = cleaned.replace('\\"', '"')
         cleaned = cleaned.replace("\\'", "'")
         
         # Replace escaped backslashes
         cleaned = cleaned.replace('\\\\', '\\')
         
-        # Convert numbered lists to proper markdown format
-        # Look for patterns like "1. Item text" and ensure proper spacing
+        # Convert to proper markdown format
         lines = cleaned.split('\n')
         formatted_lines = []
         
-        for line in lines:
-            # Check if line starts with a number followed by a period
-            if line.strip() and line.strip()[0].isdigit() and '. ' in line:
-                # Ensure proper spacing for numbered lists
-                formatted_lines.append(line.strip())
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                formatted_lines.append('')
+                continue
+                
+            # Handle numbered lists (1. Item, 2. Item, etc.)
+            if line[0].isdigit() and '. ' in line:
+                # Ensure proper markdown list formatting
+                formatted_lines.append(line)
+            # Handle bullet points or other list items
+            elif line.startswith('- ') or line.startswith('* '):
+                formatted_lines.append(line)
+            # Handle headers (if any)
+            elif line.startswith('#'):
+                formatted_lines.append(line)
+            # Handle regular paragraphs
             else:
+                # Add proper spacing for paragraphs
+                if formatted_lines and formatted_lines[-1] and not formatted_lines[-1].startswith(('1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.', '-', '*', '#')):
+                    # Add a blank line before new paragraphs
+                    if not formatted_lines[-1].startswith('\n'):
+                        formatted_lines.append('')
                 formatted_lines.append(line)
         
         return '\n'.join(formatted_lines)
