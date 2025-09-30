@@ -105,7 +105,7 @@ ORDER BY total_sales DESC
 | North  | 1,234,567.89 |
 | South  | 987,654.32  |
 | East   | 876,543.21  |
-```
+
 
 ## 🔧 Troubleshooting
 
