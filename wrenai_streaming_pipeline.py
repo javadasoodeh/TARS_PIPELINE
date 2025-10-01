@@ -25,8 +25,6 @@ class Pipeline:
         self.nlsql_response = ""
         # Thread ID management: store thread IDs per Open WebUI chat
         self.thread_ids = {}  # {openwebui_chat_id: wren_ui_thread_id}
-        self.last_sql: dict[str, str] = {}     # { openwebui_chat_id: last_success_sql }
-        self.last_question: dict[str, str] = {}# { openwebui_chat_id: last_question }
 
         self.valves = self.Valves(
             **{
@@ -319,29 +317,8 @@ class Pipeline:
         else:
             logging.info(f"New chat detected: {chat_id}, will get thread ID from Wren-UI response")
 
-        # Simple action: "show chart"
-        if user_message.strip().lower() in {"show chart", "chart", "/chart"}:
-            last_sql = self.last_sql.get(chat_id)
-            last_q = self.last_question.get(chat_id, "")
-            if not last_sql:
-                return "⚠️ No SQL found in this chat yet. Ask a data question first, then send **Show chart**."
-            yield "### 📈 Generating chart…\n"
-            try:
-                chart = self._generate_chart(last_q, last_sql, wren_ui_thread_id)
-                if "vegaSpec" in chart:
-                    spec_json = json.dumps(chart["vegaSpec"], ensure_ascii=False)
-                    # Open WebUI can render JSON blocks nicely; frontends can pick this up to embed Vega.
-                    yield "```json\n" + spec_json + "\n```\n"
-                    yield "_Tip: paste this spec into the Vega Editor or wire your UI to render Vega-Lite._"
-                else:
-                    yield f"❌ Chart error: {chart.get('error','Unknown error')}."
-            except Exception as e:
-                yield f"❌ Chart exception: {e}"
-            return
-
         # Normal question flow
         question = user_message.strip()
-        self.last_question[chat_id] = question
         yield f"### 🧠 Reasoning (live)\n"
 
         # First, try to stream the reasoning + SQL plan
@@ -391,7 +368,7 @@ class Pipeline:
                             if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
                                 exp = self._clean(ask["explanation"])
                                 yield f"\n### 💬 Explanation\n\n{exp}\n"
-                        # Store threadId if present
+                        # Store threadId if present and this is a new chat
                         if evt.get("threadId") and not wren_ui_thread_id:
                             self.set_thread_id_for_chat(chat_id, evt["threadId"])
                             wren_ui_thread_id = evt["threadId"]
@@ -438,7 +415,7 @@ class Pipeline:
                                 yield msg
                     except Exception as e:
                         yield f"\n❌ Explanation stream error: {e}\n"
-                    # Store threadId if present
+                    # Store threadId if present and this is a new chat
                     if gen.get("threadId") and not wren_ui_thread_id:
                         self.set_thread_id_for_chat(chat_id, gen["threadId"])
                         wren_ui_thread_id = gen["threadId"]
@@ -509,17 +486,8 @@ class Pipeline:
             else:
                 yield "_(No summary returned.)_\n"
             
-            # Store thread ID from summary response if we don't have one yet
-            if summ.get("threadId") and not wren_ui_thread_id:
-                self.set_thread_id_for_chat(chat_id, summ["threadId"])
-                wren_ui_thread_id = summ["threadId"]
         except Exception as e:
             yield f"_Summary failed: {e}_\n"
-
-        # Store thread ID from SQL execution response if we don't have one yet
-        if run.get("threadId") and not wren_ui_thread_id:
-            self.set_thread_id_for_chat(chat_id, run["threadId"])
-            wren_ui_thread_id = run["threadId"]
 
         # Add follow-up questions
         yield "\n---\n"
