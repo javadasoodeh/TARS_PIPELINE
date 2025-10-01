@@ -157,9 +157,11 @@ class Pipeline:
         """Generate contextual follow-up questions based on the data and original question."""
         if not records or not columns:
             return [
-                "Show me more details about this data",
+                "Can you show me more details about this data?",
                 "What are the trends in this dataset?",
-                "Can you break this down by different categories?"
+                "Can you break this down by different categories?",
+                "What insights can you provide about this data?",
+                "Show me a summary of the data structure"
             ]
         
         column_names = [col["name"] for col in columns]
@@ -168,47 +170,68 @@ class Pipeline:
         # Analyze the original question to generate relevant follow-ups
         question_lower = original_question.lower()
         
-        # If asking about specific fields/columns
-        if any(word in question_lower for word in ["field", "column", "what", "explain", "about"]):
+        # If asking about top/ranking data
+        if any(word in question_lower for word in ["top", "best", "highest", "most", "ranking"]):
             follow_ups.extend([
-                "Show me the data types of these fields",
+                "Can you show me the bottom 5 instead?",
+                "How do these compare to the previous period?",
+                "What percentage of the total do these represent?",
+                "Can you break this down by different categories?",
+                "What are the trends for these top performers?"
+            ])
+        
+        # If asking about specific fields/columns
+        elif any(word in question_lower for word in ["field", "column", "what", "explain", "about"]):
+            follow_ups.extend([
+                "Can you show me the data types of these fields?",
                 "What are the unique values in each field?",
-                "Are there any missing values in this data?"
+                "Are there any missing values in this data?",
+                "Can you run a sample query on this data?",
+                "What insights can you provide about these fields?"
             ])
         
         # If asking about counts or totals
-        if any(word in question_lower for word in ["count", "total", "sum", "how many"]):
+        elif any(word in question_lower for word in ["count", "total", "sum", "how many"]):
             follow_ups.extend([
-                "Show me the top 10 records",
+                "Can you show me the top 10 records?",
                 "What's the average value?",
-                "Break this down by different categories"
+                "How do these numbers compare to previous periods?",
+                "Can you break this down by different categories?",
+                "What percentage of the total do these represent?"
             ])
         
         # If asking about specific data
-        if any(word in question_lower for word in ["show", "list", "get", "find"]):
+        elif any(word in question_lower for word in ["show", "list", "get", "find"]):
             follow_ups.extend([
-                "Sort this data by different columns",
-                "Filter this data by specific criteria",
-                "Show me summary statistics"
+                "Can you sort this data by different columns?",
+                "Can you filter this data by specific criteria?",
+                "What are the summary statistics for this data?",
+                "Can you show me trends over time?",
+                "What insights can you provide about this data?"
             ])
         
         # Generic follow-ups based on data structure
-        if len(records) > 0:
+        else:
             follow_ups.extend([
-                "What are the trends over time?",
-                "Show me the distribution of values",
-                "Are there any outliers in this data?"
+                "Can you show me trends over time?",
+                "What are the highest and lowest values?",
+                "Can you group this data by categories?",
+                "What insights can you provide about this data?",
+                "Can you show me summary statistics?"
             ])
         
         # Add data-specific follow-ups based on column names
         if any("date" in col.lower() for col in column_names):
-            follow_ups.append("Show me trends over time")
+            follow_ups.append("Can you show me trends over time?")
         
-        if any("count" in col.lower() or "number" in col.lower() for col in column_names):
+        if any("value" in col.lower() or "price" in col.lower() or "amount" in col.lower() for col in column_names):
             follow_ups.append("What are the highest and lowest values?")
         
-        if any("name" in col.lower() or "category" in col.lower() for col in column_names):
-            follow_ups.append("Group this data by categories")
+        if any("name" in col.lower() or "category" in col.lower() or "type" in col.lower() for col in column_names):
+            follow_ups.append("Can you group this data by categories?")
+        
+        if any("count" in col.lower() or "number" in col.lower() for col in column_names):
+            follow_ups.append("What percentage of the total do these represent?")
         
         # Remove duplicates and limit to 5 questions
         unique_follow_ups = list(dict.fromkeys(follow_ups))
@@ -375,8 +398,7 @@ class Pipeline:
                         
                         # Add follow-up questions for explanations
                         yield "\n---\n"
-                        yield "### 💡 Suggested Follow-up Questions\n\n"
-                        yield "Click on any question below to ask it:\n\n"
+                        yield "### Follow up\n\n"
                         
                         explanation_follow_ups = [
                             "Show me the data in this table",
@@ -386,8 +408,8 @@ class Pipeline:
                             "Show me a summary of the data structure"
                         ]
                         
-                        for i, follow_up in enumerate(explanation_follow_ups, 1):
-                            yield f"{i}. **{follow_up}**\n"
+                        for follow_up in explanation_follow_ups:
+                            yield f"{follow_up}\n"
                         
                         return
                 elif t == "message_stop":
@@ -433,8 +455,7 @@ class Pipeline:
                         
                         # Add follow-up questions for explanations
                         yield "\n---\n"
-                        yield "### 💡 Suggested Follow-up Questions\n\n"
-                        yield "Click on any question below to ask it:\n\n"
+                        yield "### Follow up\n\n"
                         
                         explanation_follow_ups = [
                             "Show me the data in this table",
@@ -444,8 +465,8 @@ class Pipeline:
                             "Show me a summary of the data structure"
                         ]
                         
-                        for i, follow_up in enumerate(explanation_follow_ups, 1):
-                            yield f"{i}. **{follow_up}**\n"
+                        for follow_up in explanation_follow_ups:
+                            yield f"{follow_up}\n"
                         
                         return
             # If it wasn't NON_SQL_QUERY, surface the error we got
@@ -502,13 +523,12 @@ class Pipeline:
 
         # Add follow-up questions
         yield "\n---\n"
-        yield "### 💡 Suggested Follow-up Questions\n\n"
-        yield "Click on any question below to ask it:\n\n"
+        yield "### Follow up\n\n"
         
         # Generate contextual follow-up questions based on the data
         follow_up_questions = self._generate_follow_up_questions(question, records, cols)
-        for i, follow_up in enumerate(follow_up_questions, 1):
-            yield f"{i}. **{follow_up}**\n"
+        for follow_up in follow_up_questions:
+            yield f"{follow_up}\n"
         
         yield "\n---\n"
         yield "➡️ **Type `Show chart`** to render an interactive Vega-Lite spec for this result.\n"
