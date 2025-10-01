@@ -25,6 +25,8 @@ class Pipeline:
         self.nlsql_response = ""
         # Thread ID management: store thread IDs per Open WebUI chat
         self.thread_ids = {}  # {openwebui_chat_id: wren_ui_thread_id}
+        self.last_sql: dict[str, str] = {}     # { openwebui_chat_id: last_success_sql }
+        self.last_question: dict[str, str] = {}# { openwebui_chat_id: last_question }
 
         self.valves = self.Valves(
             **{
@@ -151,90 +153,6 @@ class Pipeline:
              .replace('\\\\', '\\')
         )
 
-    def _generate_follow_up_questions(self, original_question: str, records: List[dict], columns: List[dict]) -> List[str]:
-        """Generate contextual follow-up questions based on the data and original question."""
-        if not records or not columns:
-            return [
-                "Can you show me more details about this data?",
-                "What are the trends in this dataset?",
-                "Can you break this down by different categories?",
-                "What insights can you provide about this data?",
-                "Show me a summary of the data structure"
-            ]
-        
-        column_names = [col["name"] for col in columns]
-        follow_ups = []
-        
-        # Analyze the original question to generate relevant follow-ups
-        question_lower = original_question.lower()
-        
-        # If asking about top/ranking data
-        if any(word in question_lower for word in ["top", "best", "highest", "most", "ranking"]):
-            follow_ups.extend([
-                "Can you show me the bottom 5 instead?",
-                "How do these compare to the previous period?",
-                "What percentage of the total do these represent?",
-                "Can you break this down by different categories?",
-                "What are the trends for these top performers?"
-            ])
-        
-        # If asking about specific fields/columns
-        elif any(word in question_lower for word in ["field", "column", "what", "explain", "about"]):
-            follow_ups.extend([
-                "Can you show me the data types of these fields?",
-                "What are the unique values in each field?",
-                "Are there any missing values in this data?",
-                "Can you run a sample query on this data?",
-                "What insights can you provide about these fields?"
-            ])
-        
-        # If asking about counts or totals
-        elif any(word in question_lower for word in ["count", "total", "sum", "how many"]):
-            follow_ups.extend([
-                "Can you show me the top 10 records?",
-                "What's the average value?",
-                "How do these numbers compare to previous periods?",
-                "Can you break this down by different categories?",
-                "What percentage of the total do these represent?"
-            ])
-        
-        # If asking about specific data
-        elif any(word in question_lower for word in ["show", "list", "get", "find"]):
-            follow_ups.extend([
-                "Can you sort this data by different columns?",
-                "Can you filter this data by specific criteria?",
-                "What are the summary statistics for this data?",
-                "Can you show me trends over time?",
-                "What insights can you provide about this data?"
-            ])
-        
-        # Generic follow-ups based on data structure
-        else:
-            follow_ups.extend([
-                "Can you show me trends over time?",
-                "What are the highest and lowest values?",
-                "Can you group this data by categories?",
-                "What insights can you provide about this data?",
-                "Can you show me summary statistics?"
-            ])
-        
-        # Add data-specific follow-ups based on column names
-        if any("date" in col.lower() for col in column_names):
-            follow_ups.append("Can you show me trends over time?")
-        
-        if any("value" in col.lower() or "price" in col.lower() or "amount" in col.lower() for col in column_names):
-            follow_ups.append("What are the highest and lowest values?")
-        
-        if any("name" in col.lower() or "category" in col.lower() or "type" in col.lower() for col in column_names):
-            follow_ups.append("Can you group this data by categories?")
-        
-        if any("count" in col.lower() or "number" in col.lower() for col in column_names):
-            follow_ups.append("What percentage of the total do these represent?")
-        
-        # Remove duplicates and limit to 5 questions
-        unique_follow_ups = list(dict.fromkeys(follow_ups))
-        return unique_follow_ups[:5]
-
     # ---------- Wren AI higher-level calls ----------
     def _run_sql(self, sql: str, thread_id: str | None):
         payload = {"sql": sql}
@@ -317,8 +235,29 @@ class Pipeline:
         else:
             logging.info(f"New chat detected: {chat_id}, will get thread ID from Wren-UI response")
 
+        # Simple action: "show chart"
+        if user_message.strip().lower() in {"show chart", "chart", "/chart"}:
+            last_sql = self.last_sql.get(chat_id)
+            last_q = self.last_question.get(chat_id, "")
+            if not last_sql:
+                return "⚠️ No SQL found in this chat yet. Ask a data question first, then send **Show chart**."
+            yield "### 📈 Generating chart…\n"
+            try:
+                chart = self._generate_chart(last_q, last_sql, wren_ui_thread_id)
+                if "vegaSpec" in chart:
+                    spec_json = json.dumps(chart["vegaSpec"], ensure_ascii=False)
+                    # Open WebUI can render JSON blocks nicely; frontends can pick this up to embed Vega.
+                    yield "```json\n" + spec_json + "\n```\n"
+                    yield "_Tip: paste this spec into the Vega Editor or wire your UI to render Vega-Lite._"
+                else:
+                    yield f"❌ Chart error: {chart.get('error','Unknown error')}."
+            except Exception as e:
+                yield f"❌ Chart exception: {e}"
+            return
+
         # Normal question flow
         question = user_message.strip()
+        self.last_question[chat_id] = question
         yield f"### 🧠 Reasoning (live)\n"
 
         # First, try to stream the reasoning + SQL plan
@@ -372,22 +311,6 @@ class Pipeline:
                         if evt.get("threadId") and not wren_ui_thread_id:
                             self.set_thread_id_for_chat(chat_id, evt["threadId"])
                             wren_ui_thread_id = evt["threadId"]
-                        
-                        # Add follow-up questions for explanations
-                        yield "\n---\n"
-                        yield "### Follow up\n\n"
-                        
-                        explanation_follow_ups = [
-                            "Show me the data in this table",
-                            "What are the main columns in this dataset?",
-                            "Can you run a sample query on this data?",
-                            "What insights can you provide about this data?",
-                            "Show me a summary of the data structure"
-                        ]
-                        
-                        for follow_up in explanation_follow_ups:
-                            yield f"{follow_up}\n"
-                        
                         return
                 elif t == "message_stop":
                     # done with streaming
@@ -429,33 +352,17 @@ class Pipeline:
                         if ask.get("threadId") and not wren_ui_thread_id:
                             self.set_thread_id_for_chat(chat_id, ask["threadId"])
                             wren_ui_thread_id = ask["threadId"]
-                        
-                        # Add follow-up questions for explanations
-                        yield "\n---\n"
-                        yield "### Follow up\n\n"
-                        
-                        explanation_follow_ups = [
-                            "Show me the data in this table",
-                            "What are the main columns in this dataset?",
-                            "Can you run a sample query on this data?",
-                            "What insights can you provide about this data?",
-                            "Show me a summary of the data structure"
-                        ]
-                        
-                        for follow_up in explanation_follow_ups:
-                            yield f"{follow_up}\n"
-                        
                         return
             # If it wasn't NON_SQL_QUERY, surface the error we got
             err = gen.get("error", "No SQL generated.")
             yield f"\n❌ Could not generate SQL: {err}\n"
             return
 
-        # Keep thread id for follow-ups if present anywhere
-        gen = locals().get("gen", {})
-        if "threadId" in gen:
-            if gen.get("threadId") and chat_id not in self.thread_ids:
-                self.thread_ids[chat_id] = gen["threadId"]
+        # Store thread ID from successful SQL generation if this is a new chat
+        if not wren_ui_thread_id and final_sql:
+            # Try to get thread ID from the last successful response
+            # This is a fallback in case thread ID wasn't captured earlier
+            pass
 
         # Run the SQL and stream rows
         yield "\n### 📋 Results (streaming)\n"
@@ -485,18 +392,9 @@ class Pipeline:
                 yield self._clean(summ["summary"]) + "\n"
             else:
                 yield "_(No summary returned.)_\n"
-            
         except Exception as e:
             yield f"_Summary failed: {e}_\n"
 
-        # Add follow-up questions
-        yield "\n---\n"
-        yield "### Follow up\n\n"
-        
-        # Generate contextual follow-up questions based on the data
-        follow_up_questions = self._generate_follow_up_questions(question, records, cols)
-        for follow_up in follow_up_questions:
-            yield f"{follow_up}\n"
-        
+        # Offer a chart action
         yield "\n---\n"
         yield "➡️ **Type `Show chart`** to render an interactive Vega-Lite spec for this result.\n"
