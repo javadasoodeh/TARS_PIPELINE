@@ -311,7 +311,8 @@ class Pipeline:
             return
 
         # Keep thread id for follow-ups if present anywhere
-        if "threadId" in gen := locals().get("gen", {}):
+        gen = locals().get("gen", {})
+        if "threadId" in gen:
             if gen.get("threadId") and chat_id not in self.thread_ids:
                 self.thread_ids[chat_id] = gen["threadId"]
 
