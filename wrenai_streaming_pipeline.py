@@ -260,6 +260,7 @@ class Pipeline:
         self.last_question[chat_id] = question
         yield f"### 🧠 Reasoning (live)\n"
 
+
         # First, try to stream the reasoning + SQL plan
         final_sql: str | None = None
         non_sql_query_id: str | None = None
@@ -273,6 +274,13 @@ class Pipeline:
                     state = data.get("state")
                     if state:
                         yield f"- {state}\n"
+                    
+                    # Capture thread ID from sql_generation_start state
+                    if state == "sql_generation_start" and data.get("threadId") and not wren_ui_thread_id:
+                        self.set_thread_id_for_chat(chat_id, data["threadId"])
+                        wren_ui_thread_id = data["threadId"]
+                        logging.info(f"Captured thread ID from sql_generation_start: {wren_ui_thread_id}")
+                    
                     # Show helpful extras when present
                     if data.get("rephrasedQuestion"):
                         yield f"  - rephrased: {data['rephrasedQuestion']}\n"
@@ -283,11 +291,6 @@ class Pipeline:
                         # stream the SQL block as soon as we get it
                         yield "\n### 🔍 SQL Query (generated)\n"
                         yield f"```sql\n{final_sql}\n```\n"
-                        # Capture thread ID from successful SQL generation
-                        if evt.get("threadId") and not wren_ui_thread_id:
-                            self.set_thread_id_for_chat(chat_id, evt["threadId"])
-                            wren_ui_thread_id = evt["threadId"]
-                            logging.info(f"Captured thread ID from SQL generation: {wren_ui_thread_id}")
                 elif t == "error":
                     # Handle NON_SQL_QUERY and other errors
                     error_code = (evt.get("data") or {}).get("code", "UNKNOWN")
@@ -319,12 +322,12 @@ class Pipeline:
                         return
                 elif t == "message_stop":
                     # done with streaming
+                    # Capture thread ID from message_stop if we don't have one yet
+                    if data.get("threadId") and not wren_ui_thread_id:
+                        self.set_thread_id_for_chat(chat_id, data["threadId"])
+                        wren_ui_thread_id = data["threadId"]
+                        logging.info(f"Captured thread ID from message_stop: {wren_ui_thread_id}")
                     pass
-                # Capture thread ID from any event that contains it
-                if evt.get("threadId") and not wren_ui_thread_id:
-                    self.set_thread_id_for_chat(chat_id, evt["threadId"])
-                    wren_ui_thread_id = evt["threadId"]
-                    logging.info(f"Captured thread ID from streaming response: {wren_ui_thread_id}")
                 else:
                     # Some servers send raw content or other types
                     pass
