@@ -242,6 +242,7 @@ class Pipeline:
 
         # First, try to stream the reasoning + SQL plan
         final_sql: str | None = None
+        non_sql_query_id: str | None = None
         try:
             for evt in self._stream_generate_sql(question, thread_id):
                 t = evt.get("type")
@@ -263,10 +264,33 @@ class Pipeline:
                         yield "\n### 🔍 SQL Query (generated)\n"
                         yield f"```sql\n{final_sql}\n```\n"
                 elif t == "error":
-                    # Could be INVALID_SQL, NON_SQL_QUERY, etc. We'll handle below.
+                    # Handle NON_SQL_QUERY and other errors
                     error_code = (evt.get("data") or {}).get("code", "UNKNOWN")
-                    error_msg  = (evt.get("data") or {}).get("error", "Unknown error")
+                    error_msg = (evt.get("data") or {}).get("error", "Unknown error")
                     yield f"\n❌ Streaming error [{error_code}]: {error_msg}\n"
+                    
+                    # If it's NON_SQL_QUERY, get the explanationQueryId
+                    if error_code == "NON_SQL_QUERY":
+                        non_sql_query_id = (evt.get("data") or {}).get("explanationQueryId")
+                        if non_sql_query_id:
+                            yield "\n### 💬 Explanation (live)\n"
+                            try:
+                                for exp_evt in self._stream_explanation(non_sql_query_id):
+                                    msg = exp_evt.get("message")
+                                    if msg:
+                                        yield msg
+                            except Exception as e:
+                                yield f"\n❌ Explanation stream error: {e}\n"
+                        else:
+                            # Fallback: use /ask (non-stream) explanation form
+                            ask = self._post_json("/api/v1/ask", {"question": question})
+                            if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
+                                exp = self._clean(ask["explanation"])
+                                yield f"\n### 💬 Explanation\n\n{exp}\n"
+                        # Store threadId if present
+                        if evt.get("threadId") and chat_id not in self.thread_ids:
+                            self.thread_ids[chat_id] = evt["threadId"]
+                        return
                 elif t == "message_stop":
                     # done with streaming
                     pass
@@ -276,12 +300,13 @@ class Pipeline:
         except requests.HTTPError as e:
             yield f"\n❌ Streaming failed: {e}\n"
 
-        # If we didn't get SQL from the stream, check if this was NON_SQL_QUERY and stream explanation.
-        if not final_sql:
-            # Non-stream call to detect NON_SQL_QUERY and get explanationQueryId
+        # If we didn't get SQL from the stream and it wasn't a NON_SQL_QUERY (already handled above)
+        if not final_sql and not non_sql_query_id:
+            # Non-stream call to detect other errors
             gen = self._generate_sql_once(question, thread_id)
             code = gen.get("code")
             if code == "NON_SQL_QUERY":
+                # This shouldn't happen since we handle it in the stream above, but just in case
                 exp_id = gen.get("explanationQueryId")
                 if exp_id:
                     yield "\n### 💬 Explanation (live)\n"
@@ -298,7 +323,7 @@ class Pipeline:
                     return
                 else:
                     # Fallback: use /ask (non-stream) explanation form
-                    ask = self._post_json("/ask", {"question": question})
+                    ask = self._post_json("/api/v1/ask", {"question": question})
                     if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
                         exp = self._clean(ask["explanation"])
                         yield f"\n### 💬 Explanation\n\n{exp}\n"
