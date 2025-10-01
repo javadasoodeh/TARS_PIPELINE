@@ -283,6 +283,11 @@ class Pipeline:
                         # stream the SQL block as soon as we get it
                         yield "\n### 🔍 SQL Query (generated)\n"
                         yield f"```sql\n{final_sql}\n```\n"
+                        # Capture thread ID from successful SQL generation
+                        if evt.get("threadId") and not wren_ui_thread_id:
+                            self.set_thread_id_for_chat(chat_id, evt["threadId"])
+                            wren_ui_thread_id = evt["threadId"]
+                            logging.info(f"Captured thread ID from SQL generation: {wren_ui_thread_id}")
                 elif t == "error":
                     # Handle NON_SQL_QUERY and other errors
                     error_code = (evt.get("data") or {}).get("code", "UNKNOWN")
@@ -315,6 +320,11 @@ class Pipeline:
                 elif t == "message_stop":
                     # done with streaming
                     pass
+                # Capture thread ID from any event that contains it
+                if evt.get("threadId") and not wren_ui_thread_id:
+                    self.set_thread_id_for_chat(chat_id, evt["threadId"])
+                    wren_ui_thread_id = evt["threadId"]
+                    logging.info(f"Captured thread ID from streaming response: {wren_ui_thread_id}")
                 else:
                     # Some servers send raw content or other types
                     pass
@@ -342,6 +352,7 @@ class Pipeline:
                     if gen.get("threadId") and not wren_ui_thread_id:
                         self.set_thread_id_for_chat(chat_id, gen["threadId"])
                         wren_ui_thread_id = gen["threadId"]
+                        logging.info(f"Captured thread ID from fallback response: {wren_ui_thread_id}")
                     return
                 else:
                     # Fallback: use /ask (non-stream) explanation form
@@ -352,6 +363,7 @@ class Pipeline:
                         if ask.get("threadId") and not wren_ui_thread_id:
                             self.set_thread_id_for_chat(chat_id, ask["threadId"])
                             wren_ui_thread_id = ask["threadId"]
+                            logging.info(f"Captured thread ID from ask fallback: {wren_ui_thread_id}")
                         return
             # If it wasn't NON_SQL_QUERY, surface the error we got
             err = gen.get("error", "No SQL generated.")
