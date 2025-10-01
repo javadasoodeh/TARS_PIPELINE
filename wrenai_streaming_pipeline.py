@@ -170,8 +170,8 @@ class Pipeline:
         return self._post_json("/api/v1/generate_sql", payload)
 
     def _stream_explanation(self, explanation_query_id: str):
-        # GET stream_explanation?explanationQueryId=...
-        path = f"/api/v1/stream_explanation?explanationQueryId={explanation_query_id}"
+        # GET stream_explanation?queryId=...
+        path = f"/api/v1/stream_explanation?queryId={explanation_query_id}"
         url = f"{self.valves.WREN_UI_URL}{path}"
         with requests.get(
             url,

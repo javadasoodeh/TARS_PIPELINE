@@ -12,8 +12,8 @@ def test_step_by_step():
     """Test the stream explanation flow step by step"""
     
     # Configuration
-    base_url = os.getenv("WREN_UI_URL", "http://wren-ui:3000")
-    question = "Can you explain what the data in the amarnameh_MOH_MarketData_1403 table is about?"
+    base_url = os.getenv("WREN_UI_URL", "http://localhost:3000")
+    question = "tell me about the all fields in the table"
     
     print("🧪 Manual WrenAI Stream Explanation Test")
     print("=" * 50)
@@ -38,8 +38,8 @@ def test_step_by_step():
             headers=headers,
             timeout=30
         )
-        response.raise_for_status()
         
+        # Don't raise for status - 400 might be a valid NON_SQL_QUERY response
         data = response.json()
         print("✅ Response:")
         print(json.dumps(data, indent=2))
@@ -57,7 +57,7 @@ def test_step_by_step():
                 
                 response = requests.get(
                     f"{base_url}/api/v1/stream_explanation",
-                    params={"explanationQueryId": explanation_query_id},
+                    params={"queryId": explanation_query_id},
                     headers=sse_headers,
                     stream=True,
                     timeout=60
@@ -71,14 +71,17 @@ def test_step_by_step():
                 message_count = 0
                 
                 for line in response.iter_lines(decode_unicode=True):
+                    print(f"🔍 Raw line: '{line}'")  # Debug: show all lines
                     if not line:
                         continue
                     
                     if line.startswith("data:"):
                         data_str = line[len("data:"):].strip()
+                        print(f"🔍 Data string: '{data_str}'")  # Debug: show data string
                         if data_str:
                             try:
                                 data = json.loads(data_str)
+                                print(f"🔍 Parsed JSON: {data}")  # Debug: show parsed JSON
                                 
                                 if data.get("done"):
                                     print("\n" + "=" * 50)
@@ -98,6 +101,8 @@ def test_step_by_step():
                                 print(f"Raw data: {data_str}")
                             except Exception as e:
                                 print(f"\n⚠️  Error: {e}")
+                    else:
+                        print(f"🔍 Non-data line: '{line}'")  # Debug: show non-data lines
                 
                 print(f"\n\n📝 Final text: {full_text}")
                 return True
@@ -110,6 +115,9 @@ def test_step_by_step():
             
     except requests.exceptions.RequestException as e:
         print(f"❌ Request error: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response status: {e.response.status_code}")
+            print(f"Response text: {e.response.text}")
         return False
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
