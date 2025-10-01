@@ -34,7 +34,7 @@ class Pipeline:
             **{
                 "pipelines": ["*"],
                 "WREN_UI_URL": os.getenv("WREN_UI_URL", "http://wren-ui:3000"),
-                "WREN_UI_TIMEOUT": int(os.getenv("WREN_UI_TIMEOUT", "60")),
+                "WREN_UI_TIMEOUT": int(os.getenv("WREN_UI_TIMEOUT", "600")),
                 "MAX_ROWS": int(os.getenv("MAX_ROWS", "500")),
                 "MODEL_NAME": os.getenv("MODEL_NAME", "WrenAI Database Query Pipeline"),
             }
@@ -77,20 +77,26 @@ class Pipeline:
         """Check if this is a new chat (no stored thread ID)."""
         return openwebui_chat_id not in self.thread_ids
 
-    def make_request_with_retry(self, url: str, method: str = "POST", data: dict = None, retries: int = 3, timeout: int = 60):
-        """Make HTTP request with retry logic."""
+    def make_request_with_retry(self, url: str, method: str = "POST", data: dict = None, retries: int = 3, timeout: int = 600):
+        """Make HTTP request with retry logic and extended timeout."""
         headers = {
             "Accept": "application/json; charset=utf-8",
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "WrenAI-Pipeline/2.0"
+            "User-Agent": "WrenAI-Pipeline/2.0",
+            "Connection": "keep-alive"
         }
         
         for attempt in range(retries):
             try:
+                logging.info(f"Request attempt {attempt + 1}/{retries} to {url} with timeout {timeout}s")
+                
                 if method.upper() == "POST":
-                    response = requests.post(url, json=data, headers=headers, timeout=timeout)
+                    # Use tuple for timeout: (connect timeout, read timeout)
+                    response = requests.post(url, json=data, headers=headers, timeout=(30, timeout))
                 else:
-                    response = requests.get(url, headers=headers, timeout=timeout)
+                    response = requests.get(url, headers=headers, timeout=(30, timeout))
+                
+                logging.info(f"Response status: {response.status_code}")
                 
                 # Handle 400 responses that contain JSON error messages
                 if response.status_code == 400:
@@ -105,10 +111,33 @@ class Pipeline:
                 
                 return response.json()
                 
-            except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-                logging.error(f"Attempt {attempt + 1} failed with error: {e}")
+            except requests.exceptions.Timeout as e:
+                logging.error(f"Timeout on attempt {attempt + 1}/{retries}: {e}")
                 if attempt + 1 == retries:
-                    raise
+                    return {
+                        "error": f"Request timed out after {timeout} seconds. The database query is taking too long. Please try a simpler query or contact your administrator.",
+                        "code": "TIMEOUT_ERROR"
+                    }
+                import time
+                time.sleep(5)  # Wait 5 seconds before retry
+                
+            except requests.exceptions.ConnectionError as e:
+                logging.error(f"Connection error on attempt {attempt + 1}/{retries}: {e}")
+                if attempt + 1 == retries:
+                    return {
+                        "error": f"Connection error: {str(e)}. Please check if Wren-UI is running and accessible.",
+                        "code": "CONNECTION_ERROR"
+                    }
+                import time
+                time.sleep(5)
+                
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Request failed on attempt {attempt + 1}/{retries}: {e}")
+                if attempt + 1 == retries:
+                    return {
+                        "error": f"Request failed: {str(e)}",
+                        "code": "REQUEST_ERROR"
+                    }
                 import time
                 time.sleep(2 ** attempt)  # Exponential backoff
 
