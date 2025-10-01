@@ -1,0 +1,330 @@
+"""
+title: WrenAI Database Query Pipeline (Streaming)
+author: Javad Asoodeh
+date: 2025-10-01
+version: 3.1
+license: MIT
+description: Streamed NL→SQL reasoning, results, summaries, and charts using Wren AI APIs.
+requirements: requests, pydantic
+"""
+
+import os, time, json, uuid, logging, requests
+from typing import List, Union, Generator, Iterator
+from pydantic import BaseModel
+
+logging.basicConfig(level=logging.INFO)
+
+class Pipeline:
+    class Valves(BaseModel):
+        WREN_BASE_URL: str                # e.g. http://wren-ui:3000/api/v1  (OSS) or https://cloud.getwren.ai/api/v1 (Cloud)
+        WREN_API_KEY: str | None = None   # Cloud only
+        WREN_TIMEOUT: int = 600
+        MAX_ROWS: int = 500
+        MODEL_NAME: str = "WrenAI Database Query (Streaming)"
+
+    def __init__(self):
+        self.valves = self.Valves(
+            WREN_BASE_URL=os.getenv("WREN_BASE_URL", "http://wren-ui:3000/api/v1"),
+            WREN_API_KEY=os.getenv("WREN_API_KEY", None),
+            WREN_TIMEOUT=int(os.getenv("WREN_TIMEOUT", "600")),
+            MAX_ROWS=int(os.getenv("MAX_ROWS", "500")),
+            MODEL_NAME=os.getenv("MODEL_NAME", "WrenAI Database Query (Streaming)"),
+        )
+        self._name = self.valves.MODEL_NAME
+        self.thread_ids: dict[str, str] = {}   # { openwebui_chat_id: wren_thread_id }
+        self.last_sql: dict[str, str] = {}     # { openwebui_chat_id: last_success_sql }
+        self.last_question: dict[str, str] = {}# { openwebui_chat_id: last_question }
+
+    @property
+    def name(self): return self.valves.MODEL_NAME
+    @name.setter
+    def name(self, v): self._name = v
+
+    async def on_startup(self):
+        self.name = self.valves.MODEL_NAME
+        logging.info(f"Pipeline up. Base: {self.valves.WREN_BASE_URL}")
+
+    async def on_shutdown(self):
+        logging.info("Pipeline down")
+
+    # ---------- HTTP helpers ----------
+    def _headers(self):
+        h = {
+            "Accept": "application/json; charset=utf-8",
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "WrenAI-OpenWebUI-Pipeline/3.1",
+            "Connection": "keep-alive",
+        }
+        if self.valves.WREN_API_KEY:
+            h["Authorization"] = f"Bearer {self.valves.WREN_API_KEY}"
+        return h
+
+    def _post_json(self, path: str, payload: dict, timeout: int | None = None):
+        url = f"{self.valves.WREN_BASE_URL}{path}"
+        t = (30, timeout or self.valves.WREN_TIMEOUT)
+        r = requests.post(url, json=payload, headers=self._headers(), timeout=t)
+        if r.status_code >= 400:
+            try: return r.json()
+            except: r.raise_for_status()
+        return r.json()
+
+    def _get_sse(self, path: str, payload: dict):
+        """
+        POST with SSE (Server-Sent Events). Uses 'requests' + streaming iterator.
+        Endpoint must be a streaming one (e.g. /stream/generate_sql).
+        """
+        url = f"{self.valves.WREN_BASE_URL}{path}"
+        with requests.post(
+            url,
+            json=payload,
+            headers={**self._headers(), "Accept": "text/event-stream"},
+            stream=True,
+            timeout=(30, self.valves.WREN_TIMEOUT),
+        ) as r:
+            r.raise_for_status()
+            for line in r.iter_lines(decode_unicode=True):
+                if not line: 
+                    continue
+                # SSE lines are like: "data: {...json...}"
+                if line.startswith("data:"):
+                    data = line[len("data:"):].strip()
+                    if data:
+                        try:
+                            yield json.loads(data)
+                        except Exception:
+                            # Some servers may send keep-alives or non-JSON messages
+                            yield {"type": "raw", "data": data}
+
+    # ---------- Formatting ----------
+    def _md_table(self, records: List[dict], columns: List[dict], max_rows: int) -> str:
+        if not records or not columns:
+            return "No data available."
+        names = [c["name"] for c in columns]
+        head = "| " + " | ".join(names) + " |\n| " + " | ".join(["---"] * len(names)) + " |\n"
+        lines = []
+        for rec in records[:max_rows]:
+            vals = []
+            for n in names:
+                v = rec.get(n, "")
+                if isinstance(v, float):
+                    vals.append(f"{v:,.2f}" if abs(v) >= 1000 else f"{v:.2f}")
+                elif isinstance(v, int):
+                    vals.append(f"{v:,}")
+                else:
+                    vals.append("" if v is None else str(v))
+            lines.append("| " + " | ".join(vals) + " |")
+        extra = ""
+        if len(records) > max_rows:
+            extra = f"\n\n**Total rows:** {len(records):,} (showing first {max_rows:,})"
+        else:
+            extra = f"\n\n**Total rows:** {len(records):,}"
+        return head + "\n".join(lines) + extra
+
+    def _clean(self, s: str | None) -> str:
+        if not s: return ""
+        return (
+            s.replace("\\n", "\n")
+             .replace('\\"', '"')
+             .replace("\\'", "'")
+             .replace('\\\\', '\\')
+        )
+
+    # ---------- Wren AI higher-level calls ----------
+    def _run_sql(self, sql: str, thread_id: str | None):
+        payload = {"sql": sql}
+        if thread_id: payload["threadId"] = thread_id
+        return self._post_json("/run_sql", payload)
+
+    def _generate_summary(self, question: str, sql: str, thread_id: str | None):
+        payload = {"question": question, "sql": sql}
+        if thread_id: payload["threadId"] = thread_id
+        return self._post_json("/generate_summary", payload)
+
+    def _generate_chart(self, question: str, sql: str, thread_id: str | None):
+        payload = {"question": question, "sql": sql}
+        if thread_id: payload["threadId"] = thread_id
+        return self._post_json("/generate_vega_chart", payload)
+
+    # Streaming generate_sql (preferred for reasoning UI)
+    def _stream_generate_sql(self, question: str, thread_id: str | None):
+        payload = {"question": question}
+        if thread_id: payload["threadId"] = thread_id
+        for evt in self._get_sse("/stream/generate_sql", payload):
+            yield evt
+
+    # Non-stream generate_sql (used only to detect NON_SQL_QUERY to get explanationQueryId)
+    def _generate_sql_once(self, question: str, thread_id: str | None):
+        payload = {"question": question}
+        if thread_id: payload["threadId"] = thread_id
+        return self._post_json("/generate_sql", payload)
+
+    def _stream_explanation(self, explanation_query_id: str):
+        # GET stream_explanation?explanationQueryId=...
+        path = f"/stream_explanation?explanationQueryId={explanation_query_id}"
+        url = f"{self.valves.WREN_BASE_URL}{path}"
+        with requests.get(
+            url,
+            headers={**self._headers(), "Accept": "text/event-stream"},
+            stream=True,
+            timeout=(30, self.valves.WREN_TIMEOUT),
+        ) as r:
+            r.raise_for_status()
+            for line in r.iter_lines(decode_unicode=True):
+                if not line: 
+                    continue
+                # SSE lines are like: "data: {...json...}"
+                if line.startswith("data:"):
+                    data = line[len("data:"):].strip()
+                    if data:
+                        try:
+                            yield json.loads(data)
+                        except Exception:
+                            # Some servers may send keep-alives or non-JSON messages
+                            yield {"type": "raw", "data": data}
+
+    # ---------- Pipeline entry ----------
+    def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
+        """
+        UX behavior:
+        • Always stream reasoning states from /stream/generate_sql.
+        • If NON_SQL_QUERY -> stream explanation text.
+        • If SQL OK -> run SQL, stream rows; then generate summary.
+        • Provide "Show chart" action using last SQL in chat.
+        """
+        chat_id = (body or {}).get("metadata", {}).get("chat_id") or "unknown-chat"
+        thread_id = self.thread_ids.get(chat_id)
+
+        # Simple action: "show chart"
+        if user_message.strip().lower() in {"show chart", "chart", "/chart"}:
+            last_sql = self.last_sql.get(chat_id)
+            last_q = self.last_question.get(chat_id, "")
+            if not last_sql:
+                return "⚠️ No SQL found in this chat yet. Ask a data question first, then send **Show chart**."
+            yield "### 📈 Generating chart…\n"
+            try:
+                chart = self._generate_chart(last_q, last_sql, thread_id)
+                if "vegaSpec" in chart:
+                    spec_json = json.dumps(chart["vegaSpec"], ensure_ascii=False)
+                    # Open WebUI can render JSON blocks nicely; frontends can pick this up to embed Vega.
+                    yield "```json\n" + spec_json + "\n```\n"
+                    yield "_Tip: paste this spec into the Vega Editor or wire your UI to render Vega-Lite._"
+                else:
+                    yield f"❌ Chart error: {chart.get('error','Unknown error')}."
+            except Exception as e:
+                yield f"❌ Chart exception: {e}"
+            return
+
+        # Normal question flow
+        question = user_message.strip()
+        self.last_question[chat_id] = question
+        yield f"### 🧠 Reasoning (live)\n"
+
+        # First, try to stream the reasoning + SQL plan
+        final_sql: str | None = None
+        try:
+            for evt in self._stream_generate_sql(question, thread_id):
+                t = evt.get("type")
+                data = evt.get("data") or {}
+                if t == "message_start":
+                    yield "- started\n"
+                elif t == "state":
+                    state = data.get("state")
+                    if state:
+                        yield f"- {state}\n"
+                    # Show helpful extras when present
+                    if data.get("rephrasedQuestion"):
+                        yield f"  - rephrased: {data['rephrasedQuestion']}\n"
+                    if data.get("retrievedTables"):
+                        yield f"  - tables: {', '.join(data['retrievedTables'])}\n"
+                    if state == "sql_generation_success" and data.get("sql"):
+                        final_sql = data["sql"]
+                        # stream the SQL block as soon as we get it
+                        yield "\n### 🔍 SQL Query (generated)\n"
+                        yield f"```sql\n{final_sql}\n```\n"
+                elif t == "error":
+                    # Could be INVALID_SQL, NON_SQL_QUERY, etc. We'll handle below.
+                    error_code = (evt.get("data") or {}).get("code", "UNKNOWN")
+                    error_msg  = (evt.get("data") or {}).get("error", "Unknown error")
+                    yield f"\n❌ Streaming error [{error_code}]: {error_msg}\n"
+                elif t == "message_stop":
+                    # done with streaming
+                    pass
+                else:
+                    # Some servers send raw content or other types
+                    pass
+        except requests.HTTPError as e:
+            yield f"\n❌ Streaming failed: {e}\n"
+
+        # If we didn't get SQL from the stream, check if this was NON_SQL_QUERY and stream explanation.
+        if not final_sql:
+            # Non-stream call to detect NON_SQL_QUERY and get explanationQueryId
+            gen = self._generate_sql_once(question, thread_id)
+            code = gen.get("code")
+            if code == "NON_SQL_QUERY":
+                exp_id = gen.get("explanationQueryId")
+                if exp_id:
+                    yield "\n### 💬 Explanation (live)\n"
+                    try:
+                        for evt in self._stream_explanation(exp_id):
+                            msg = evt.get("message")
+                            if msg:
+                                yield msg
+                    except Exception as e:
+                        yield f"\n❌ Explanation stream error: {e}\n"
+                    # Store threadId if present
+                    if gen.get("threadId") and chat_id not in self.thread_ids:
+                        self.thread_ids[chat_id] = gen["threadId"]
+                    return
+                else:
+                    # Fallback: use /ask (non-stream) explanation form
+                    ask = self._post_json("/ask", {"question": question})
+                    if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
+                        exp = self._clean(ask["explanation"])
+                        yield f"\n### 💬 Explanation\n\n{exp}\n"
+                        if ask.get("threadId") and chat_id not in self.thread_ids:
+                            self.thread_ids[chat_id] = ask["threadId"]
+                        return
+            # If it wasn't NON_SQL_QUERY, surface the error we got
+            err = gen.get("error", "No SQL generated.")
+            yield f"\n❌ Could not generate SQL: {err}\n"
+            return
+
+        # Keep thread id for follow-ups if present anywhere
+        if "threadId" in gen := locals().get("gen", {}):
+            if gen.get("threadId") and chat_id not in self.thread_ids:
+                self.thread_ids[chat_id] = gen["threadId"]
+
+        # Run the SQL and stream rows
+        yield "\n### 📋 Results (streaming)\n"
+        run = self._run_sql(final_sql, thread_id)
+        if run.get("error"):
+            yield f"❌ SQL execution error: {run['error']}\n"
+            return
+
+        records = run.get("records", [])
+        cols    = run.get("columns", [])
+        total   = run.get("totalRows", len(records))
+        self.last_sql[chat_id] = final_sql  # for later "Show chart"
+        if not records:
+            yield "_No data returned._\n"
+        else:
+            # Stream as chunks to avoid oversize messages
+            table_md = self._md_table(records, cols, self.valves.MAX_ROWS)
+            chunk = 2000
+            for i in range(0, len(table_md), chunk):
+                yield table_md[i : i + chunk]
+
+        # Generate a natural-language summary (non-stream, fast & simple)
+        yield "\n\n### 🧾 Summary\n"
+        try:
+            summ = self._generate_summary(question, final_sql, thread_id)
+            if summ.get("summary"):
+                yield self._clean(summ["summary"]) + "\n"
+            else:
+                yield "_(No summary returned.)_\n"
+        except Exception as e:
+            yield f"_Summary failed: {e}_\n"
+
+        # Offer a chart action
+        yield "\n---\n"
+        yield "➡️ **Type `Show chart`** to render an interactive Vega-Lite spec for this result.\n"
