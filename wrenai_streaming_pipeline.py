@@ -60,6 +60,19 @@ class Pipeline:
     async def on_shutdown(self):
         logging.info("Pipeline down")
 
+    def get_thread_id_for_chat(self, openwebui_chat_id: str) -> str:
+        """Get the Wren-UI thread ID for a given Open WebUI chat ID."""
+        return self.thread_ids.get(openwebui_chat_id)
+
+    def set_thread_id_for_chat(self, openwebui_chat_id: str, wren_ui_thread_id: str):
+        """Set the Wren-UI thread ID for a given Open WebUI chat ID."""
+        self.thread_ids[openwebui_chat_id] = wren_ui_thread_id
+        logging.info(f"Stored thread ID {wren_ui_thread_id} for chat {openwebui_chat_id}")
+
+    def is_new_chat(self, openwebui_chat_id: str) -> bool:
+        """Check if this is a new chat (no stored thread ID)."""
+        return openwebui_chat_id not in self.thread_ids
+
     # ---------- HTTP helpers ----------
     def _headers(self):
         h = {
@@ -140,6 +153,67 @@ class Pipeline:
              .replace('\\\\', '\\')
         )
 
+    def _generate_follow_up_questions(self, original_question: str, records: List[dict], columns: List[dict]) -> List[str]:
+        """Generate contextual follow-up questions based on the data and original question."""
+        if not records or not columns:
+            return [
+                "Show me more details about this data",
+                "What are the trends in this dataset?",
+                "Can you break this down by different categories?"
+            ]
+        
+        column_names = [col["name"] for col in columns]
+        follow_ups = []
+        
+        # Analyze the original question to generate relevant follow-ups
+        question_lower = original_question.lower()
+        
+        # If asking about specific fields/columns
+        if any(word in question_lower for word in ["field", "column", "what", "explain", "about"]):
+            follow_ups.extend([
+                "Show me the data types of these fields",
+                "What are the unique values in each field?",
+                "Are there any missing values in this data?"
+            ])
+        
+        # If asking about counts or totals
+        if any(word in question_lower for word in ["count", "total", "sum", "how many"]):
+            follow_ups.extend([
+                "Show me the top 10 records",
+                "What's the average value?",
+                "Break this down by different categories"
+            ])
+        
+        # If asking about specific data
+        if any(word in question_lower for word in ["show", "list", "get", "find"]):
+            follow_ups.extend([
+                "Sort this data by different columns",
+                "Filter this data by specific criteria",
+                "Show me summary statistics"
+            ])
+        
+        # Generic follow-ups based on data structure
+        if len(records) > 0:
+            follow_ups.extend([
+                "What are the trends over time?",
+                "Show me the distribution of values",
+                "Are there any outliers in this data?"
+            ])
+        
+        # Add data-specific follow-ups based on column names
+        if any("date" in col.lower() for col in column_names):
+            follow_ups.append("Show me trends over time")
+        
+        if any("count" in col.lower() or "number" in col.lower() for col in column_names):
+            follow_ups.append("What are the highest and lowest values?")
+        
+        if any("name" in col.lower() or "category" in col.lower() for col in column_names):
+            follow_ups.append("Group this data by categories")
+        
+        # Remove duplicates and limit to 5 questions
+        unique_follow_ups = list(dict.fromkeys(follow_ups))
+        return unique_follow_ups[:5]
+
     # ---------- Wren AI higher-level calls ----------
     def _run_sql(self, sql: str, thread_id: str | None):
         payload = {"sql": sql}
@@ -213,7 +287,14 @@ class Pipeline:
             openwebui_chat_id = "unknown-chat"
         
         chat_id = openwebui_chat_id
-        thread_id = self.thread_ids.get(chat_id)
+        
+        # Get or determine Wren-UI thread ID
+        wren_ui_thread_id = self.get_thread_id_for_chat(chat_id)
+        
+        if wren_ui_thread_id:
+            logging.info(f"Using existing Wren-UI thread ID: {wren_ui_thread_id} for chat: {chat_id}")
+        else:
+            logging.info(f"New chat detected: {chat_id}, will get thread ID from Wren-UI response")
 
         # Simple action: "show chart"
         if user_message.strip().lower() in {"show chart", "chart", "/chart"}:
@@ -223,7 +304,7 @@ class Pipeline:
                 return "⚠️ No SQL found in this chat yet. Ask a data question first, then send **Show chart**."
             yield "### 📈 Generating chart…\n"
             try:
-                chart = self._generate_chart(last_q, last_sql, thread_id)
+                chart = self._generate_chart(last_q, last_sql, wren_ui_thread_id)
                 if "vegaSpec" in chart:
                     spec_json = json.dumps(chart["vegaSpec"], ensure_ascii=False)
                     # Open WebUI can render JSON blocks nicely; frontends can pick this up to embed Vega.
@@ -244,7 +325,7 @@ class Pipeline:
         final_sql: str | None = None
         non_sql_query_id: str | None = None
         try:
-            for evt in self._stream_generate_sql(question, thread_id):
+            for evt in self._stream_generate_sql(question, wren_ui_thread_id):
                 t = evt.get("type")
                 data = evt.get("data") or {}
                 if t == "message_start":
@@ -288,8 +369,26 @@ class Pipeline:
                                 exp = self._clean(ask["explanation"])
                                 yield f"\n### 💬 Explanation\n\n{exp}\n"
                         # Store threadId if present
-                        if evt.get("threadId") and chat_id not in self.thread_ids:
-                            self.thread_ids[chat_id] = evt["threadId"]
+                        if evt.get("threadId") and not wren_ui_thread_id:
+                            self.set_thread_id_for_chat(chat_id, evt["threadId"])
+                            wren_ui_thread_id = evt["threadId"]
+                        
+                        # Add follow-up questions for explanations
+                        yield "\n---\n"
+                        yield "### 💡 Suggested Follow-up Questions\n\n"
+                        yield "Click on any question below to ask it:\n\n"
+                        
+                        explanation_follow_ups = [
+                            "Show me the data in this table",
+                            "What are the main columns in this dataset?",
+                            "Can you run a sample query on this data?",
+                            "What insights can you provide about this data?",
+                            "Show me a summary of the data structure"
+                        ]
+                        
+                        for i, follow_up in enumerate(explanation_follow_ups, 1):
+                            yield f"{i}. **{follow_up}**\n"
+                        
                         return
                 elif t == "message_stop":
                     # done with streaming
@@ -303,7 +402,7 @@ class Pipeline:
         # If we didn't get SQL from the stream and it wasn't a NON_SQL_QUERY (already handled above)
         if not final_sql and not non_sql_query_id:
             # Non-stream call to detect other errors
-            gen = self._generate_sql_once(question, thread_id)
+            gen = self._generate_sql_once(question, wren_ui_thread_id)
             code = gen.get("code")
             if code == "NON_SQL_QUERY":
                 # This shouldn't happen since we handle it in the stream above, but just in case
@@ -318,8 +417,9 @@ class Pipeline:
                     except Exception as e:
                         yield f"\n❌ Explanation stream error: {e}\n"
                     # Store threadId if present
-                    if gen.get("threadId") and chat_id not in self.thread_ids:
-                        self.thread_ids[chat_id] = gen["threadId"]
+                    if gen.get("threadId") and not wren_ui_thread_id:
+                        self.set_thread_id_for_chat(chat_id, gen["threadId"])
+                        wren_ui_thread_id = gen["threadId"]
                     return
                 else:
                     # Fallback: use /ask (non-stream) explanation form
@@ -327,8 +427,26 @@ class Pipeline:
                     if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
                         exp = self._clean(ask["explanation"])
                         yield f"\n### 💬 Explanation\n\n{exp}\n"
-                        if ask.get("threadId") and chat_id not in self.thread_ids:
-                            self.thread_ids[chat_id] = ask["threadId"]
+                        if ask.get("threadId") and not wren_ui_thread_id:
+                            self.set_thread_id_for_chat(chat_id, ask["threadId"])
+                            wren_ui_thread_id = ask["threadId"]
+                        
+                        # Add follow-up questions for explanations
+                        yield "\n---\n"
+                        yield "### 💡 Suggested Follow-up Questions\n\n"
+                        yield "Click on any question below to ask it:\n\n"
+                        
+                        explanation_follow_ups = [
+                            "Show me the data in this table",
+                            "What are the main columns in this dataset?",
+                            "Can you run a sample query on this data?",
+                            "What insights can you provide about this data?",
+                            "Show me a summary of the data structure"
+                        ]
+                        
+                        for i, follow_up in enumerate(explanation_follow_ups, 1):
+                            yield f"{i}. **{follow_up}**\n"
+                        
                         return
             # If it wasn't NON_SQL_QUERY, surface the error we got
             err = gen.get("error", "No SQL generated.")
@@ -343,7 +461,7 @@ class Pipeline:
 
         # Run the SQL and stream rows
         yield "\n### 📋 Results (streaming)\n"
-        run = self._run_sql(final_sql, thread_id)
+        run = self._run_sql(final_sql, wren_ui_thread_id)
         if run.get("error"):
             yield f"❌ SQL execution error: {run['error']}\n"
             return
@@ -364,14 +482,33 @@ class Pipeline:
         # Generate a natural-language summary (non-stream, fast & simple)
         yield "\n\n### 🧾 Summary\n"
         try:
-            summ = self._generate_summary(question, final_sql, thread_id)
+            summ = self._generate_summary(question, final_sql, wren_ui_thread_id)
             if summ.get("summary"):
                 yield self._clean(summ["summary"]) + "\n"
             else:
                 yield "_(No summary returned.)_\n"
+            
+            # Store thread ID from summary response if we don't have one yet
+            if summ.get("threadId") and not wren_ui_thread_id:
+                self.set_thread_id_for_chat(chat_id, summ["threadId"])
+                wren_ui_thread_id = summ["threadId"]
         except Exception as e:
             yield f"_Summary failed: {e}_\n"
 
-        # Offer a chart action
+        # Store thread ID from SQL execution response if we don't have one yet
+        if run.get("threadId") and not wren_ui_thread_id:
+            self.set_thread_id_for_chat(chat_id, run["threadId"])
+            wren_ui_thread_id = run["threadId"]
+
+        # Add follow-up questions
+        yield "\n---\n"
+        yield "### 💡 Suggested Follow-up Questions\n\n"
+        yield "Click on any question below to ask it:\n\n"
+        
+        # Generate contextual follow-up questions based on the data
+        follow_up_questions = self._generate_follow_up_questions(question, records, cols)
+        for i, follow_up in enumerate(follow_up_questions, 1):
+            yield f"{i}. **{follow_up}**\n"
+        
         yield "\n---\n"
         yield "➡️ **Type `Show chart`** to render an interactive Vega-Lite spec for this result.\n"
