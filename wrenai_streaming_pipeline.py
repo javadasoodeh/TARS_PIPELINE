@@ -395,6 +395,8 @@ class Pipeline:
         if not sql or not sql.strip():
             raise ValueError("SQL query is required for chart generation")
         
+        # Use only the specific question and SQL for chart generation
+        # This ensures we don't send the entire conversation history
         payload = {
             "question": question.strip(),
             "sql": sql.strip()
@@ -402,6 +404,8 @@ class Pipeline:
         if thread_id:
             payload["threadId"] = thread_id
         
+        logging.info(f"Generating chart for question: '{question[:100]}...' and SQL: '{sql[:100]}...'")
+        logging.info(f"Chart payload: {json.dumps(payload, indent=2)}")
         return self._post_json("/api/v1/generate_vega_chart", payload)
 
     def _stream_generate_sql(self, question: str, thread_id: Optional[str]):
@@ -452,6 +456,7 @@ class Pipeline:
                 return "⚠️ **No question found in this chat yet.**\n\nAsk a data question first, then send **Show chart** to visualize the results."
             
             yield "### 📈 Generating chart…\n"
+            logging.info(f"Chart action - Using last question: '{last_q[:100]}...' and last SQL: '{last_sql[:100]}...'")
             try:
                 chart = self._generate_chart(last_q, last_sql, thread_id)
                 
