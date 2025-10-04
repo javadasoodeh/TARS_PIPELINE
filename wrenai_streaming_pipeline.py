@@ -80,7 +80,7 @@ class Pipeline:
         return r.json()
 
     def _post_sse(self, path: str, payload: dict):
-        """Single streaming call site."""
+        """Single streaming call site. Force UTF-8 decoding to avoid mojibake."""
         url = f"{self.valves.WREN_UI_URL}{path}"
         with requests.post(
             url,
@@ -90,17 +90,25 @@ class Pipeline:
             timeout=(30, self.valves.WREN_UI_TIMEOUT),
         ) as r:
             r.raise_for_status()
-            for line in r.iter_lines(decode_unicode=True):
-                if not line:
+            # Do NOT rely on r.encoding (often ISO-8859-1 for SSE). Decode bytes as UTF-8 ourselves.
+            for raw in r.iter_lines(decode_unicode=False):  # bytes, not str
+                if not raw:
                     continue
-                if line.startswith("data:"):
-                    data = line[5:].strip()
-                    if not data:
+                if raw.startswith(b"data:"):
+                    data_bytes = raw[len(b"data:"):].strip()
+                    if not data_bytes:
                         continue
                     try:
-                        yield json.loads(data)
+                        data_text = data_bytes.decode("utf-8", errors="strict")
+                    except UnicodeDecodeError:
+                        # Fallback: replace undecodable bytes instead of crashing
+                        data_text = data_bytes.decode("utf-8", errors="replace")
+                    try:
+                        yield json.loads(data_text)
                     except Exception:
-                        yield {"type": "raw", "data": data}
+                        # Non-JSON payload (rare); still return as text
+                        yield {"type": "raw", "data": data_text}
+
 
     # ---------------- Formatting helpers ----------------
     def _md_table(self, records: List[dict], columns: List[dict], max_rows: int) -> str:
@@ -313,6 +321,33 @@ class Pipeline:
             return True
 
         return False
+    
+    def _normalize_stream_text(self, s: Optional[str]) -> str:
+        """
+        Fixes common streaming text artifacts so Open-WebUI renders markdown nicely.
+        - Converts escaped newlines to real newlines.
+        - Repairs common mojibake sequences (UTF-8 decoded as Latin-1).
+        """
+        if not s:
+            return ""
+        # 1) turn '\n' into actual newlines
+        s = s.replace("\\n", "\n").replace("\\r", "\r")
+
+        # 2) common mojibake fixes
+        replacements = {
+            "â€™": "’",   # right single quote
+            "â€˜": "‘",   # left single quote
+            "â€œ": "“",   # left double quote
+            "â€�": "”",   # right double quote
+            "â€“": "–",   # en dash
+            "â€”": "—",   # em dash
+            "â€¦": "…",   # ellipsis
+            "â€": "”",    # stray double quote variant
+        }
+        for bad, good in replacements.items():
+            s = s.replace(bad, good)
+
+        return s
 
     # ---------------- Pipeline ----------------
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
@@ -423,14 +458,14 @@ class Pipeline:
                         cb = evt.get("content_block", {})
                         if cb.get("type") == "text":
                             name = cb.get("name") or "content"
-                            # Two leading newlines break out of the preceding bullet list so markdown renders correctly
+                            # blank line before heading to break out of '- ...' list
                             yield f"\n\n### 🧾 {name.replace('_',' ').title()}\n\n"
 
                     elif et == "content_block_delta":
                         delta = evt.get("delta", {})
                         text = delta.get("text") or delta.get("value") or ""
                         if text:
-                            yield text
+                            yield self._normalize_stream_text(text)
 
                     elif et == "content_block_stop":
                         yield "\n"
