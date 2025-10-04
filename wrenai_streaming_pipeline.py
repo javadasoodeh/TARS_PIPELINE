@@ -2,7 +2,7 @@
 title: WrenAI Database Query Pipeline (Streaming)
 author: Javad Asoodeh
 date: 2025-10-01
-version: 3.2
+version: 3.3
 license: MIT
 description: Streamed NL→SQL reasoning, results, summaries, and charts using Wren AI APIs.
 requirements: requests, pydantic
@@ -67,7 +67,7 @@ class Pipeline:
         return {
             "Accept": "application/json; charset=utf-8",
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "WrenAI-OpenWebUI-Pipeline/3.2",
+            "User-Agent": "WrenAI-OpenWebUI-Pipeline/3.3",
             "Connection": "keep-alive",
         }
 
@@ -242,7 +242,7 @@ class Pipeline:
     def build_standalone_html(self, vega_spec: dict, title: str = "Vega-Lite Chart") -> str:
         """Generate a working standalone HTML file with proper Vega-Lite embedding."""
         spec_json = json.dumps(vega_spec, ensure_ascii=False, indent=2)
-        
+
         return f"""<!doctype html>
 <html>
 <head>
@@ -371,6 +371,27 @@ class Pipeline:
 </body>
 </html>"""
 
+    # ---------------- Convenience helpers (NEW) ----------------
+    def _is_command(self, txt: str) -> bool:
+        if not txt:
+            return False
+        t = txt.strip().lower()
+        return t in {"show chart", "chart", "/chart"}
+
+    def _extract_last_user_message(self, messages: List[dict]) -> str:
+        """
+        Return the content of the last user role message (string only).
+        This protects us from Open WebUI variants that include history in user_message.
+        """
+        if not messages:
+            return ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    return content.strip()
+        return ""
+
     # ---------------- Wren endpoints ----------------
     def _run_sql(self, sql: str, thread_id: Optional[str]):
         payload = {"sql": sql}
@@ -394,16 +415,14 @@ class Pipeline:
             raise ValueError("Question is required for chart generation")
         if not sql or not sql.strip():
             raise ValueError("SQL query is required for chart generation")
-        
-        # Use only the specific question and SQL for chart generation
-        # This ensures we don't send the entire conversation history
+
         payload = {
             "question": question.strip(),
             "sql": sql.strip()
         }
         if thread_id:
             payload["threadId"] = thread_id
-        
+
         logging.info(f"Generating chart for question: '{question[:100]}...' and SQL: '{sql[:100]}...'")
         logging.info(f"Chart payload: {json.dumps(payload, indent=2)}")
         return self._post_json("/api/v1/generate_vega_chart", payload)
@@ -443,29 +462,33 @@ class Pipeline:
         # Thread id (kept per chat)
         thread_id = self.get_thread_id_for_chat(chat_id)
 
-        # ---- Chart action ----
-        if user_message.strip().lower() in {"show chart", "chart", "/chart"}:
+        # Determine the true last user turn (avoid history blobs)
+        last_user_turn = self._extract_last_user_message(messages)
+        incoming_text = last_user_turn or (user_message.strip() if isinstance(user_message, str) else "")
+
+        # ---- Chart action (do NOT overwrite last_question here) ----
+        if self._is_command(incoming_text):
             last_sql = self.last_sql.get(chat_id)
             last_q = self.last_question.get(chat_id, "")
-            
-            # Validate that we have both question and SQL
+
             if not last_sql or not last_sql.strip():
-                return "⚠️ **No SQL query found in this chat yet.**\n\nAsk a data question first that generates SQL, then send **Show chart** to visualize the results."
-            
+                return ("⚠️ **No SQL query found in this chat yet.**\n\n"
+                        "Ask a data question first that generates SQL, then send **Show chart** to visualize the results.")
             if not last_q or not last_q.strip():
-                return "⚠️ **No question found in this chat yet.**\n\nAsk a data question first, then send **Show chart** to visualize the results."
-            
+                return ("⚠️ **No question found in this chat yet.**\n\n"
+                        "Ask a data question first, then send **Show chart** to visualize the results.")
+
             yield "### 📈 Generating chart…\n"
             logging.info(f"Chart action - Using last question: '{last_q[:100]}...' and last SQL: '{last_sql[:100]}...'")
             try:
                 chart = self._generate_chart(last_q, last_sql, thread_id)
-                
+
                 # Check for chart generation errors
                 if "error" in chart:
                     error_msg = chart.get("error", "Unknown error")
                     error_code = chart.get("code", "UNKNOWN")
                     yield f"❌ **Chart generation failed**\n\n**Error Code:** `{error_code}`\n**Message:** {error_msg}\n\n"
-                    
+
                     # Provide helpful guidance based on error type
                     if error_code == "INVALID_SQL":
                         yield "_This SQL query doesn't return data suitable for visualization. Try asking a different question that generates data in a chartable format._"
@@ -474,7 +497,7 @@ class Pipeline:
                     else:
                         yield "_Please try asking a different question or check if your SQL query is valid._"
                     return
-                
+
                 if "vegaSpec" in chart:
                     spec = chart["vegaSpec"]
 
@@ -502,15 +525,13 @@ class Pipeline:
                 else:
                     yield f"❌ **Unexpected chart response format**\n\nReceived: {chart}\n\nPlease try again or contact support."
             except ValueError as e:
-                # Handle validation errors
                 yield f"❌ **Chart validation error:** {e}"
             except Exception as e:
                 yield f"❌ **Chart generation exception:** {e}\n\nPlease try asking a different question or check your data."
             return
 
         # ---- Normal question flow ----
-        question = user_message.strip()
-        self.last_question[chat_id] = question
+        question = incoming_text
         yield "### 🧠 Reasoning (live)\n"
 
         final_sql: Optional[str] = None
@@ -530,7 +551,7 @@ class Pipeline:
                     if state:
                         yield f"- {state}\n"
 
-                    # Capture threadId when available (e.g., in sql_generation_start or message_stop)
+                    # Capture threadId when available
                     if data.get("threadId") and not thread_id:
                         thread_id = data["threadId"]
                         self.set_thread_id_for_chat(chat_id, thread_id)
@@ -539,8 +560,13 @@ class Pipeline:
                         yield f"  - rephrased: {data['rephrasedQuestion']}\n"
                     if data.get("retrievedTables"):
                         yield f"  - tables: {', '.join(data['retrievedTables'])}\n"
+
                     if state == "sql_generation_success" and data.get("sql"):
                         final_sql = data["sql"]
+                        # ✅ Store last question ONLY on successful SQL generation (prefer rephrased)
+                        effective_q = data.get("rephrasedQuestion") or question
+                        self.last_question[chat_id] = (effective_q or "").strip()
+                        logging.info(f"[{chat_id}] Stored last_question ({len(self.last_question[chat_id])} chars)")
                         yield "\n### 🔍 SQL Query (generated)\n"
                         yield f"```sql\n{final_sql}\n```\n"
 
@@ -565,7 +591,7 @@ class Pipeline:
                             ask = self._post_json("/api/v1/ask", {"question": question})
                             if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
                                 yield f"\n### 💬 Explanation\n\n{self._clean(ask['explanation'])}\n"
-                        
+
                         # For non-SQL queries, don't offer chart generation
                         yield "\n---\n"
                         yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
@@ -588,7 +614,15 @@ class Pipeline:
         if not final_sql and not non_sql_query_id:
             gen = self._generate_sql_once(question, thread_id)
             code = gen.get("code")
-            if code == "NON_SQL_QUERY":
+            if code == "SUCCESS" and gen.get("sql"):
+                final_sql = gen["sql"]
+                # ✅ Store last question on success here as well (prefer rephrased)
+                effective_q = gen.get("rephrasedQuestion") or question
+                self.last_question[chat_id] = (effective_q or "").strip()
+                logging.info(f"[{chat_id}] Stored last_question ({len(self.last_question[chat_id])} chars)")
+                yield "\n### 🔍 SQL Query (generated)\n"
+                yield f"```sql\n{final_sql}\n```\n"
+            elif code == "NON_SQL_QUERY":
                 is_non_sql_query = True
                 exp_id = gen.get("explanationQueryId")
                 if exp_id:
@@ -603,7 +637,7 @@ class Pipeline:
                     if gen.get("threadId") and not thread_id:
                         thread_id = gen["threadId"]
                         self.set_thread_id_for_chat(chat_id, thread_id)
-                    
+
                     # For non-SQL queries, don't offer chart generation
                     yield "\n---\n"
                     yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
@@ -615,14 +649,15 @@ class Pipeline:
                         if ask.get("threadId") and not thread_id:
                             thread_id = ask["threadId"]
                             self.set_thread_id_for_chat(chat_id, thread_id)
-                        
+
                         # For non-SQL queries, don't offer chart generation
                         yield "\n---\n"
                         yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
                         return
-            err = gen.get("error", "No SQL generated.")
-            yield f"\n❌ Could not generate SQL: {err}\n"
-            return
+            else:
+                err = gen.get("error", "No SQL generated.")
+                yield f"\n❌ Could not generate SQL: {err}\n"
+                return
 
         # ---- Run SQL and stream results ----
         yield "\n### 📋 Results (streaming)\n"
@@ -647,7 +682,7 @@ class Pipeline:
         # ---- Summary ----
         yield "\n\n### 🧾 Summary\n"
         try:
-            summ = self._generate_summary(question, final_sql, thread_id)
+            summ = self._generate_summary(self.last_question.get(chat_id, question), final_sql, thread_id)
             if summ.get("summary"):
                 yield self._clean(summ["summary"]) + "\n"
             else:
