@@ -1,10 +1,10 @@
 """
-title: WrenAI Database Query Pipeline (Streaming)
+title: WrenAI Database Query Pipeline (Streaming via /stream/ask — single call, no history, ignore UI auto-prompts)
 author: Javad Asoodeh
-date: 2025-10-01
-version: 3.3
+date: 2025-10-04
+version: 4.4
 license: MIT
-description: Streamed NL→SQL reasoning, results, summaries, and charts using Wren AI APIs.
+description: Calls /stream/ask exactly once for real user questions. Ignores Open-WebUI synthetic prompts (follow-ups, auto-title, etc.). Chart generation kept as your working version (Vega Editor link + PNG/SVG HTML).
 requirements: requests, pydantic
 """
 
@@ -17,18 +17,16 @@ logging.basicConfig(level=logging.INFO)
 
 class Pipeline:
     class Valves(BaseModel):
-        # For OSS, set WREN_UI_URL like: http://wren-ui:3000
-        # (We'll add /api/v1 paths below.)
         WREN_UI_URL: str
         WREN_UI_TIMEOUT: int = 600
         MAX_ROWS: int = 500
         MODEL_NAME: str = "WrenAI Database Query (Streaming)"
 
     def __init__(self):
-        self.nlsql_response = ""
-        self.thread_ids: Dict[str, str] = {}       # { openwebui_chat_id: wren_thread_id }
-        self.last_sql: Dict[str, str] = {}         # { openwebui_chat_id: last_success_sql }
-        self.last_question: Dict[str, str] = {}    # { openwebui_chat_id: last_question }
+        # session-scoped state (per Open-WebUI chat)
+        self.thread_ids: Dict[str, str] = {}        # { chat_id: wren_thread_id }
+        self.last_sql: Dict[str, str] = {}          # { chat_id: last_success_sql }
+        self.last_question: Dict[str, str] = {}     # { chat_id: last_effective_question }
 
         self.valves = self.Valves(
             **{
@@ -67,14 +65,13 @@ class Pipeline:
         return {
             "Accept": "application/json; charset=utf-8",
             "Content-Type": "application/json; charset=utf-8",
-            "User-Agent": "WrenAI-OpenWebUI-Pipeline/3.3",
+            "User-Agent": "WrenAI-OpenWebUI-Pipeline/4.4",
             "Connection": "keep-alive",
         }
 
     def _post_json(self, path: str, payload: dict, timeout: Optional[int] = None):
         url = f"{self.valves.WREN_UI_URL}{path}"
-        t = (30, timeout or self.valves.WREN_UI_TIMEOUT)
-        r = requests.post(url, json=payload, headers=self._headers(), timeout=t)
+        r = requests.post(url, json=payload, headers=self._headers(), timeout=(30, timeout or self.valves.WREN_UI_TIMEOUT))
         if r.status_code >= 400:
             try:
                 return r.json()
@@ -82,17 +79,12 @@ class Pipeline:
                 r.raise_for_status()
         return r.json()
 
-    def _get_sse(self, path: str, payload: Optional[dict] = None):
-        """
-        POST (or GET, depending on endpoint) with Server-Sent Events.
-        For POST SSE endpoints, supply payload; for GET SSE endpoints, payload=None.
-        """
+    def _post_sse(self, path: str, payload: dict):
+        """Single streaming call site."""
         url = f"{self.valves.WREN_UI_URL}{path}"
-        method = "GET" if payload is None else "POST"
-        req = requests.get if method == "GET" else requests.post
-        with req(
+        with requests.post(
             url,
-            json=(payload if method == "POST" else None),
+            json=payload,
             headers={**self._headers(), "Accept": "text/event-stream"},
             stream=True,
             timeout=(30, self.valves.WREN_UI_TIMEOUT),
@@ -102,7 +94,7 @@ class Pipeline:
                 if not line:
                     continue
                 if line.startswith("data:"):
-                    data = line[len("data:"):].strip()
+                    data = line[5:].strip()
                     if not data:
                         continue
                     try:
@@ -145,104 +137,67 @@ class Pipeline:
              .replace('\\\\', '\\')
         )
 
-    # ---------------- Vega Editor link (compressed) ----------------
+    # ---------------- Vega (working block) ----------------
     _base64_uri = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-$"
-
-    def _lz_char_from_int(self, a: int) -> str:
-        return self._base64_uri[a]
+    def _lz_char_from_int(self, a: int) -> str: return self._base64_uri[a]
 
     def _lz_compress_to_uri_component(self, uncompressed: str) -> str:
-        """
-        Minimal Python adaptation of LZ-String compressToEncodedURIComponent.
-        For production, consider a maintained library.
-        """
-        if uncompressed is None:
-            return ""
+        """Minimal Python adaptation of LZ-String compressToEncodedURIComponent."""
+        if uncompressed is None: return ""
         dict_map, dict_to_create = {}, {}
         wc = ""
         enlarge_in, dict_size, num_bits = 2, 3, 2
-        data = []
-        data_val, data_position = 0, 0
-
+        data, data_val, data_position = [], 0, 0
         def write_bits(value, numbits):
             nonlocal data_val, data_position, data
             for _ in range(numbits):
-                data_val = (data_val << 1) | (value & 1)
-                value >>= 1
+                data_val = (data_val << 1) | (value & 1); value >>= 1
                 if data_position == 5:
-                    data.append(self._lz_char_from_int(data_val))
-                    data_val, data_position = 0, 0
+                    data.append(self._lz_char_from_int(data_val)); data_val = 0; data_position = 0
                 else:
                     data_position += 1
-
         for cc in uncompressed:
             if cc not in dict_map:
-                dict_map[cc] = dict_size
-                dict_size += 1
-                dict_to_create[cc] = True
+                dict_map[cc] = dict_size; dict_size += 1; dict_to_create[cc] = True
             wc2 = wc + cc
             if wc2 in dict_map:
                 wc = wc2
             else:
                 if wc in dict_to_create:
-                    if ord(wc[0]) < 256:
-                        write_bits(0, num_bits)
-                        write_bits(ord(wc[0]), 8)
-                    else:
-                        write_bits(1, num_bits)
-                        write_bits(ord(wc[0]), 16)
+                    if ord(wc[0]) < 256: write_bits(0, num_bits); write_bits(ord(wc[0]), 8)
+                    else: write_bits(1, num_bits); write_bits(ord(wc[0]), 16)
                     enlarge_in -= 1
-                    if enlarge_in == 0:
-                        enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
+                    if enlarge_in == 0: enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
                     del dict_to_create[wc]
                 else:
-                    write_bits(dict_map[wc], num_bits)
-                    enlarge_in -= 1
-                    if enlarge_in == 0:
-                        enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
-                dict_map[wc2] = dict_size
-                dict_size += 1
-                wc = cc
-
+                    write_bits(dict_map[wc], num_bits); enlarge_in -= 1
+                    if enlarge_in == 0: enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
+                dict_map[wc2] = dict_size; dict_size += 1; wc = cc
         if wc:
             if wc in dict_to_create:
-                if ord(wc[0]) < 256:
-                    write_bits(0, num_bits)
-                    write_bits(ord(wc[0]), 8)
-                else:
-                    write_bits(1, num_bits)
-                    write_bits(ord(wc[0]), 16)
+                if ord(wc[0]) < 256: write_bits(0, num_bits); write_bits(ord(wc[0]), 8)
+                else: write_bits(1, num_bits); write_bits(ord(wc[0]), 16)
                 del dict_to_create[wc]
             else:
                 write_bits(dict_map[wc], num_bits)
             enlarge_in -= 1
-            if enlarge_in == 0:
-                enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
-
-        # EOF
+            if enlarge_in == 0: enlarge_in, num_bits = 2 ** num_bits, num_bits + 1
         write_bits(2, num_bits)
-
-        # flush
         while True:
             data_val <<= 1
             if data_position == 5:
-                data.append(self._lz_char_from_int(data_val))
-                break
+                data.append(self._lz_char_from_int(data_val)); break
             else:
                 data_position += 1
-
         return "".join(data)
 
     def build_vega_editor_url(self, vega_spec: dict, mode: str = "vega-lite") -> str:
         payload = {"mode": mode, "spec": vega_spec}
         encoded = self._lz_compress_to_uri_component(json.dumps(payload, ensure_ascii=False))
-        # This route is accepted by current Vega Editor builds for preloaded specs.
         return f"https://vega.github.io/editor/#/url/vega-lite/{encoded}"
 
     def build_standalone_html(self, vega_spec: dict, title: str = "Vega-Lite Chart") -> str:
-        """Generate a working standalone HTML file with proper Vega-Lite embedding."""
         spec_json = json.dumps(vega_spec, ensure_ascii=False, indent=2)
-
         return f"""<!doctype html>
 <html>
 <head>
@@ -253,60 +208,14 @@ class Pipeline:
   <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
   <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
   <style>
-    body {{ 
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; 
-      margin: 0; 
-      padding: 16px;
-      background: #f9fafb;
-    }}
-    .container {{
-      max-width: 1200px;
-      margin: 0 auto;
-      background: white;
-      padding: 24px;
-      border-radius: 12px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }}
-    .bar {{ 
-      display: flex; 
-      gap: 12px; 
-      flex-wrap: wrap; 
-      align-items: center; 
-      margin-bottom: 20px; 
-    }}
-    .bar a {{ 
-      text-decoration: none; 
-      padding: 10px 16px; 
-      border-radius: 8px; 
-      border: 1px solid #d0d7de; 
-      background: #f6f8fa;
-      font-size: 14px;
-      font-weight: 500;
-      transition: all 0.2s;
-    }}
-    .bar a:hover {{ 
-      background: #1570EF;
-      color: white;
-      border-color: #1570EF;
-    }}
-    #vis {{ 
-      width: 100%; 
-      height: 500px;
-      margin-top: 16px; 
-    }}
-    .hint {{ 
-      color: #6b7280; 
-      font-size: 12px; 
-      margin-top: 12px;
-      font-style: italic;
-    }}
-    .error {{
-      color: #b91c1c;
-      background: #fee;
-      padding: 16px;
-      border-radius: 8px;
-      border: 1px solid #fcc;
-    }}
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; padding:16px; background:#f9fafb; }}
+    .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+    .bar {{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:20px; }}
+    .bar a {{ text-decoration:none; padding:10px 16px; border-radius:8px; border:1px solid #d0d7de; background:#f6f8fa; font-size:14px; font-weight:500; transition:all 0.2s; }}
+    .bar a:hover {{ background:#1570EF; color:white; border-color:#1570EF; }}
+    #vis {{ width:100%; height:500px; margin-top:16px; }}
+    .hint {{ color:#6b7280; font-size:12px; margin-top:12px; font-style:italic; }}
+    .error {{ color:#b91c1c; background:#fee; padding:16px; border-radius:8px; border:1px solid #fcc; }}
   </style>
 </head>
 <body>
@@ -321,76 +230,31 @@ class Pipeline:
 
   <script type="text/javascript">
     const spec = {spec_json};
-
-    // Embed the visualization
-    vegaEmbed('#vis', spec, {{
-      actions: false,
-      renderer: 'canvas'
-    }}).then(result => {{
+    vegaEmbed('#vis', spec, {{ actions: false, renderer: 'canvas' }}).then(result => {{
       const view = result.view;
-
-      // Save as PNG
       document.getElementById('savePNG').addEventListener('click', e => {{
         e.preventDefault();
         view.toImageURL('png').then(url => {{
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'chart.png';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-        }}).catch(err => {{
-          alert('PNG export failed: ' + err.message);
-        }});
+          const a = document.createElement('a'); a.href = url; a.download = 'chart.png';
+          document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        }}).catch(err => alert('PNG export failed: ' + err.message));
       }});
-
-      // Save as SVG
       document.getElementById('saveSVG').addEventListener('click', e => {{
         e.preventDefault();
         view.toSVG().then(svg => {{
           const blob = new Blob([svg], {{ type: 'image/svg+xml' }});
           const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'chart.svg';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }}).catch(err => {{
-          alert('SVG export failed: ' + err.message);
-        }});
+          const a = document.createElement('a'); a.href = url; a.download = 'chart.svg';
+          document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        }}).catch(err => alert('SVG export failed: ' + err.message));
       }});
-
     }}).catch(err => {{
-      document.getElementById('vis').innerHTML = 
-        '<div class="error"><strong>Error loading chart:</strong><br>' + err + '</div>';
+      document.getElementById('vis').innerHTML = '<div class="error"><strong>Error loading chart:</strong><br>' + err + '</div>';
       console.error('Vega-Embed Error:', err);
     }});
   </script>
 </body>
 </html>"""
-
-    # ---------------- Convenience helpers (NEW) ----------------
-    def _is_command(self, txt: str) -> bool:
-        if not txt:
-            return False
-        t = txt.strip().lower()
-        return t in {"show chart", "chart", "/chart"}
-
-    def _extract_last_user_message(self, messages: List[dict]) -> str:
-        """
-        Return the content of the last user role message (string only).
-        This protects us from Open WebUI variants that include history in user_message.
-        """
-        if not messages:
-            return ""
-        for m in reversed(messages):
-            if m.get("role") == "user":
-                content = m.get("content", "")
-                if isinstance(content, str):
-                    return content.strip()
-        return ""
 
     # ---------------- Wren endpoints ----------------
     def _run_sql(self, sql: str, thread_id: Optional[str]):
@@ -399,119 +263,107 @@ class Pipeline:
             payload["threadId"] = thread_id
         return self._post_json("/api/v1/run_sql", payload)
 
-    def _generate_summary(self, question: str, sql: str, thread_id: Optional[str]):
-        payload = {"question": question, "sql": sql}
-        if thread_id:
-            payload["threadId"] = thread_id
-        return self._post_json("/api/v1/generate_summary", payload)
-
     def _generate_chart(self, question: str, sql: str, thread_id: Optional[str]):
-        """
-        Generate Vega chart from question and SQL query.
-        Sends only the question, SQL, and threadId as required by the API.
-        """
-        # Validate inputs
+        # working behavior you had (question + sql [+ threadId])
         if not question or not question.strip():
             raise ValueError("Question is required for chart generation")
         if not sql or not sql.strip():
             raise ValueError("SQL query is required for chart generation")
-
-        payload = {
-            "question": question.strip(),
-            "sql": sql.strip()
-        }
+        payload = {"question": question.strip(), "sql": sql.strip()}
         if thread_id:
             payload["threadId"] = thread_id
-
-        logging.info(f"Generating chart for question: '{question[:100]}...' and SQL: '{sql[:100]}...'")
-        logging.info(f"Chart payload: {json.dumps(payload, indent=2)}")
         return self._post_json("/api/v1/generate_vega_chart", payload)
 
-    def _stream_generate_sql(self, question: str, thread_id: Optional[str]):
-        payload = {"question": question}
-        if thread_id:
-            payload["threadId"] = thread_id
-        # POST SSE
-        yield from self._get_sse("/api/v1/stream/generate_sql", payload)
+    # ---------------- Command & auto-prompt detection ----------------
+    def _is_chart_cmd(self, txt: str) -> bool:
+        t = (txt or "").strip().lower()
+        return t in {"show chart", "chart", "/chart"}
 
-    def _generate_sql_once(self, question: str, thread_id: Optional[str]):
-        payload = {"question": question}
-        if thread_id:
-            payload["threadId"] = thread_id
-        return self._post_json("/api/v1/generate_sql", payload)
+    def _is_openwebui_autoprompt(self, txt: str) -> bool:
+        """
+        Detects Open-WebUI synthetic prompts (follow-ups, auto-title, etc.).
+        These are NOT real user questions and must NOT call Wren.
+        """
+        if not txt:
+            return False
+        low = txt.lower()
 
-    def _stream_explanation(self, explanation_query_id: str):
-        # IMPORTANT: Wren docs use explanationQueryId param name
-        path = f"/api/v1/stream_explanation?explanationQueryId={explanation_query_id}"
-        # GET SSE
-        yield from self._get_sse(path, payload=None)
+        # Generic markers present in OWUI synthetic prompts
+        if "chat_history" in low or "<chat_history>" in low or "</chat_history>" in low:
+            return True
+        if "### task:" in low or "output: json" in low or "your entire response must consist solely of a json object" in low:
+            return True
 
-    # ---------------- Pipeline entry ----------------
+        # Follow-ups generator templates
+        if "follow-up" in low or "follow ups" in low or '"follow_ups"' in low:
+            return True
+        if "suggest 3-5 relevant follow-up questions" in low:
+            return True
+
+        # Auto-title generator templates
+        if "generate a concise, 3-5 word title" in low:
+            return True
+        if "emoji summarizing the chat history" in low and "title" in low:
+            return True
+        if '"title":' in low and "examples:" in low and "chat history" in low:
+            return True
+
+        # Any other system-like prompts that reference /stream/ask with history
+        if "/stream/ask" in low and "chat history" in low:
+            return True
+
+        return False
+
+    # ---------------- Pipeline ----------------
     def pipe(self, user_message: str, model_id: str, messages: List[dict], body: dict) -> Union[str, Generator, Iterator]:
         """
-        UX behavior:
-        • Stream reasoning states from /stream/generate_sql.
-        • If NON_SQL_QUERY -> stream explanation text.
-        • If SQL OK -> run SQL, stream rows; then generate summary.
-        • Provide "Show chart" action using last SQL in chat.
+        • Uses only `user_message` as the question (ignores `messages` history completely).
+        • Exactly one POST to /api/v1/stream/ask for actual user questions.
+        • Ignores Open-WebUI synthetic prompts so they don't hit Wren.
+        • After sql_execution_end, pulls rows once via /run_sql.
+        • Chart generation on demand via "Show chart".
         """
-        # Identify Open WebUI chat id
         metadata = (body or {}).get("metadata", {})
         chat_id = metadata.get("chat_id") or metadata.get("session_id") or metadata.get("thread_id") or "unknown-chat"
-
-        # Thread id (kept per chat)
         thread_id = self.get_thread_id_for_chat(chat_id)
 
-        # Determine the true last user turn (avoid history blobs)
-        last_user_turn = self._extract_last_user_message(messages)
-        incoming_text = last_user_turn or (user_message.strip() if isinstance(user_message, str) else "")
+        # ONLY the direct user message; never read `messages` history
+        question = (user_message or "").strip()
+        if not question:
+            return "Please enter a question."
 
-        # ---- Chart action (do NOT overwrite last_question here) ----
-        if self._is_command(incoming_text):
+        # Ignore Open-WebUI auto-prompts (prevents the duplicate /stream/ask you see in logs)
+        if self._is_openwebui_autoprompt(question):
+            return ""
+
+        # Chart command
+        if self._is_chart_cmd(question):
             last_sql = self.last_sql.get(chat_id)
             last_q = self.last_question.get(chat_id, "")
+            if not last_sql:
+                return ("⚠️ **No SQL query found in this chat yet.**\n\nAsk a data question first, then send **Show chart**.")
+            if not last_q:
+                return ("⚠️ **No question found in this chat yet.**\n\nAsk a data question first, then send **Show chart**.")
 
-            if not last_sql or not last_sql.strip():
-                return ("⚠️ **No SQL query found in this chat yet.**\n\n"
-                        "Ask a data question first that generates SQL, then send **Show chart** to visualize the results.")
-            if not last_q or not last_q.strip():
-                return ("⚠️ **No question found in this chat yet.**\n\n"
-                        "Ask a data question first, then send **Show chart** to visualize the results.")
-
-            yield "### 📈 Generating chart…\n"
-            logging.info(f"Chart action - Using last question: '{last_q[:100]}...' and last SQL: '{last_sql[:100]}...'")
-            try:
-                chart = self._generate_chart(last_q, last_sql, thread_id)
-
-                # Check for chart generation errors
-                if "error" in chart:
-                    error_msg = chart.get("error", "Unknown error")
-                    error_code = chart.get("code", "UNKNOWN")
-                    yield f"❌ **Chart generation failed**\n\n**Error Code:** `{error_code}`\n**Message:** {error_msg}\n\n"
-
-                    # Provide helpful guidance based on error type
-                    if error_code == "INVALID_SQL":
-                        yield "_This SQL query doesn't return data suitable for visualization. Try asking a different question that generates data in a chartable format._"
-                    elif "no data" in error_msg.lower() or "empty" in error_msg.lower():
-                        yield "_The SQL query returned no data to visualize. Check your data or try a different question._"
-                    else:
-                        yield "_Please try asking a different question or check if your SQL query is valid._"
-                    return
-
-                if "vegaSpec" in chart:
-                    spec = chart["vegaSpec"]
-
-                    # 1) Raw spec (for debugging / visibility)
+            def _chart():
+                yield "### 📈 Generating chart…\n"
+                try:
+                    chart = self._generate_chart(last_q, last_sql, thread_id)
+                    if "error" in chart:
+                        yield f"❌ **Chart generation failed** `{chart.get('code','UNKNOWN')}`\n\n{chart.get('error','Unknown error')}\n"
+                        return
+                    spec = chart.get("vegaSpec")
+                    if not spec:
+                        yield f"❌ Unexpected chart response: {chart}\n"; return
+                    # 1) Raw spec
                     yield "```json\n" + json.dumps(spec, ensure_ascii=False) + "\n```\n"
-
-                    # 2) One-click Vega Editor link (preloaded)
+                    # 2) Vega Editor link
                     try:
                         editor_url = self.build_vega_editor_url(spec, mode="vega-lite")
                         yield f"[Open in Vega Editor]({editor_url})\n"
                     except Exception as e:
                         yield f"_Could not build Vega Editor link: {e}_\n"
-
-                    # 3) Self-contained HTML viewer
+                    # 3) Standalone HTML viewer
                     try:
                         html = self.build_standalone_html(spec, title="WrenAI Chart")
                         yield "\n<details><summary>Standalone HTML viewer (click to expand)</summary>\n\n"
@@ -520,176 +372,111 @@ class Pipeline:
                         yield "_Save the HTML block above as `chart.html` and open it in a browser for an interactive chart._\n"
                     except Exception as e:
                         yield f"_Could not build standalone HTML: {e}_\n"
-
                     yield "_Tip: the Vega Editor link opens the chart already filled — no copy/paste needed._"
-                else:
-                    yield f"❌ **Unexpected chart response format**\n\nReceived: {chart}\n\nPlease try again or contact support."
-            except ValueError as e:
-                yield f"❌ **Chart validation error:** {e}"
-            except Exception as e:
-                yield f"❌ **Chart generation exception:** {e}\n\nPlease try asking a different question or check your data."
-            return
+                except Exception as e:
+                    yield f"❌ **Chart generation exception:** {e}\n"
+            return _chart()
 
-        # ---- Normal question flow ----
-        question = incoming_text
-        yield "### 🧠 Reasoning (live)\n"
+        # ---- Single /stream/ask call for real questions ----
+        def _stream():
+            nonlocal thread_id
+            yield "### 🧠 Live pipeline (/stream/ask)\n"
 
-        final_sql: Optional[str] = None
-        non_sql_query_id: Optional[str] = None
-        is_non_sql_query = False
+            final_sql: Optional[str] = None
+            saw_sql_exec_end = False
+            effective_question = question
 
-        try:
-            for evt in self._stream_generate_sql(question, thread_id):
-                evt_type = evt.get("type")
-                data = evt.get("data") or {}
+            payload = {"question": question}  # question only; no history
+            if thread_id:
+                payload["threadId"] = thread_id
 
-                if evt_type == "message_start":
-                    yield "- started\n"
+            try:
+                for evt in self._post_sse("/api/v1/stream/ask", payload):
+                    et = evt.get("type")
 
-                elif evt_type == "state":
-                    state = data.get("state")
-                    if state:
-                        yield f"- {state}\n"
+                    if et == "message_start":
+                        yield "- message_start\n"
 
-                    # Capture threadId when available
-                    if data.get("threadId") and not thread_id:
-                        thread_id = data["threadId"]
-                        self.set_thread_id_for_chat(chat_id, thread_id)
+                    elif et == "state":
+                        data = evt.get("data", {})
+                        state = data.get("state")
+                        if state:
+                            yield f"- {state}\n"
 
-                    if data.get("rephrasedQuestion"):
-                        yield f"  - rephrased: {data['rephrasedQuestion']}\n"
-                    if data.get("retrievedTables"):
-                        yield f"  - tables: {', '.join(data['retrievedTables'])}\n"
-
-                    if state == "sql_generation_success" and data.get("sql"):
-                        final_sql = data["sql"]
-                        # ✅ Store last question ONLY on successful SQL generation (prefer rephrased)
-                        effective_q = data.get("rephrasedQuestion") or question
-                        self.last_question[chat_id] = (effective_q or "").strip()
-                        logging.info(f"[{chat_id}] Stored last_question ({len(self.last_question[chat_id])} chars)")
-                        yield "\n### 🔍 SQL Query (generated)\n"
-                        yield f"```sql\n{final_sql}\n```\n"
-
-                elif evt_type == "error":
-                    code = (evt.get("data") or {}).get("code", "UNKNOWN")
-                    msg = (evt.get("data") or {}).get("error", "Unknown error")
-                    yield f"\n❌ Streaming error [{code}]: {msg}\n"
-                    if code == "NON_SQL_QUERY":
-                        is_non_sql_query = True
-                        non_sql_query_id = (evt.get("data") or {}).get("explanationQueryId")
-                        if non_sql_query_id:
-                            yield "\n### 💬 Explanation (live)\n"
-                            try:
-                                for exp_evt in self._stream_explanation(non_sql_query_id):
-                                    m = exp_evt.get("message")
-                                    if m:
-                                        yield m
-                            except Exception as e:
-                                yield f"\n❌ Explanation stream error: {e}\n"
-                        else:
-                            # Fallback to /ask for explanation text
-                            ask = self._post_json("/api/v1/ask", {"question": question})
-                            if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
-                                yield f"\n### 💬 Explanation\n\n{self._clean(ask['explanation'])}\n"
-
-                        # For non-SQL queries, don't offer chart generation
-                        yield "\n---\n"
-                        yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
-                        return
-
-                elif evt_type == "message_stop":
-                    # Capture threadId on stop if provided
-                    if data.get("threadId") and not thread_id:
-                        thread_id = data["threadId"]
-                        self.set_thread_id_for_chat(chat_id, thread_id)
-
-                else:
-                    # ignore raw/unknown
-                    pass
-
-        except requests.HTTPError as e:
-            yield f"\n❌ Streaming failed: {e}\n"
-
-        # If no SQL and not a NON_SQL_QUERY (already handled), try non-stream once
-        if not final_sql and not non_sql_query_id:
-            gen = self._generate_sql_once(question, thread_id)
-            code = gen.get("code")
-            if code == "SUCCESS" and gen.get("sql"):
-                final_sql = gen["sql"]
-                # ✅ Store last question on success here as well (prefer rephrased)
-                effective_q = gen.get("rephrasedQuestion") or question
-                self.last_question[chat_id] = (effective_q or "").strip()
-                logging.info(f"[{chat_id}] Stored last_question ({len(self.last_question[chat_id])} chars)")
-                yield "\n### 🔍 SQL Query (generated)\n"
-                yield f"```sql\n{final_sql}\n```\n"
-            elif code == "NON_SQL_QUERY":
-                is_non_sql_query = True
-                exp_id = gen.get("explanationQueryId")
-                if exp_id:
-                    yield "\n### 💬 Explanation (live)\n"
-                    try:
-                        for evt in self._stream_explanation(exp_id):
-                            m = evt.get("message")
-                            if m:
-                                yield m
-                    except Exception as e:
-                        yield f"\n❌ Explanation stream error: {e}\n"
-                    if gen.get("threadId") and not thread_id:
-                        thread_id = gen["threadId"]
-                        self.set_thread_id_for_chat(chat_id, thread_id)
-
-                    # For non-SQL queries, don't offer chart generation
-                    yield "\n---\n"
-                    yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
-                    return
-                else:
-                    ask = self._post_json("/api/v1/ask", {"question": question})
-                    if ask.get("type") == "NON_SQL_QUERY" and ask.get("explanation"):
-                        yield f"\n### 💬 Explanation\n\n{self._clean(ask['explanation'])}\n"
-                        if ask.get("threadId") and not thread_id:
-                            thread_id = ask["threadId"]
+                        if data.get("threadId") and not thread_id:
+                            thread_id = data["threadId"]
                             self.set_thread_id_for_chat(chat_id, thread_id)
 
-                        # For non-SQL queries, don't offer chart generation
-                        yield "\n---\n"
-                        yield "ℹ️ **This question doesn't generate SQL data, so chart visualization is not available.**\n\nAsk a data-related question to generate charts."
+                        if data.get("rephrasedQuestion"):
+                            effective_question = data["rephrasedQuestion"]
+                            yield f"  - rephrased: {effective_question}\n"
+                        if data.get("retrievedTables"):
+                            yield f"  - tables: {', '.join(data['retrievedTables'])}\n"
+                        if state == "sql_generation_success" and data.get("sql"):
+                            final_sql = data["sql"]
+                            yield "\n### 🔍 SQL Query (generated)\n"
+                            yield f"```sql\n{final_sql}\n```\n"
+                        if state == "sql_execution_end":
+                            saw_sql_exec_end = True
+
+                    elif et == "content_block_start":
+                        cb = evt.get("content_block", {})
+                        if cb.get("type") == "text":
+                            name = cb.get("name") or "content"
+                            # Two leading newlines break out of the preceding bullet list so markdown renders correctly
+                            yield f"\n\n### 🧾 {name.replace('_',' ').title()}\n\n"
+
+                    elif et == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        text = delta.get("text") or delta.get("value") or ""
+                        if text:
+                            yield text
+
+                    elif et == "content_block_stop":
+                        yield "\n"
+
+                    elif et == "error":
+                        data = evt.get("data", {})
+                        code = data.get("code", "UNKNOWN")
+                        msg = data.get("error", "Unknown error")
+                        yield f"\n❌ Error `{code}`: {msg}\n"
                         return
-            else:
-                err = gen.get("error", "No SQL generated.")
-                yield f"\n❌ Could not generate SQL: {err}\n"
+
+                    elif et == "message_stop":
+                        data = evt.get("data", {})
+                        if data.get("threadId") and not thread_id:
+                            thread_id = data["threadId"]
+                            self.set_thread_id_for_chat(chat_id, thread_id)
+                        yield "- message_stop\n"
+
+            except requests.HTTPError as e:
+                yield f"\n❌ Streaming failed: {e}\n"
                 return
 
-        # ---- Run SQL and stream results ----
-        yield "\n### 📋 Results (streaming)\n"
-        run = self._run_sql(final_sql, thread_id)
-        if run.get("error"):
-            yield f"❌ SQL execution error: {run['error']}\n"
-            return
+            # Persist for charting
+            self.last_question[chat_id] = (effective_question or question or "").strip()
 
-        records = run.get("records", [])
-        cols = run.get("columns", [])
-        total = run.get("totalRows", len(records))
-        self.last_sql[chat_id] = final_sql
+            if final_sql and saw_sql_exec_end:
+                self.last_sql[chat_id] = final_sql
+                yield "\n### 📋 Results\n"
+                run = self._run_sql(final_sql, thread_id)
+                if run.get("error"):
+                    yield f"❌ SQL execution error: {run['error']}\n"
+                else:
+                    records = run.get("records", [])
+                    cols = run.get("columns", [])
+                    if records:
+                        table_md = self._md_table(records, cols, self.valves.MAX_ROWS)
+                        chunk = 2000
+                        for i in range(0, len(table_md), chunk):
+                            yield table_md[i:i+chunk]
+                    else:
+                        yield "_No data returned._\n"
 
-        if not records:
-            yield "_No data returned._\n"
-        else:
-            table_md = self._md_table(records, cols, self.valves.MAX_ROWS)
-            chunk = 2000
-            for i in range(0, len(table_md), chunk):
-                yield table_md[i : i + chunk]
-
-        # ---- Summary ----
-        yield "\n\n### 🧾 Summary\n"
-        try:
-            summ = self._generate_summary(self.last_question.get(chat_id, question), final_sql, thread_id)
-            if summ.get("summary"):
-                yield self._clean(summ["summary"]) + "\n"
+                yield "\n---\n"
+                yield "➡️ **Type `Show chart`** to render a Vega-Lite chart for this result.\n"
             else:
-                yield "_(No summary returned.)_\n"
-        except Exception as e:
-            yield f"_Summary failed: {e}_\n"
+                yield "\n---\n"
+                yield "ℹ️ No SQL was produced for this question. Ask a data-related question to get tables and charts.\n"
 
-        # Offer chart action
-        yield "\n---\n"
-        yield "➡️ **Type `Show chart`** to render an interactive Vega-Lite spec for this result.\n"
+        return _stream()
